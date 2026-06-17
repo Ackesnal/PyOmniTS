@@ -104,8 +104,9 @@ class Model(nn.Module):
             raise NotImplementedError()
         # END adaptor
 
-
+        # print(x_mark_new.shape, x_new.shape, x_mask_new.shape, y_mark_new.shape, y_new.shape, y_mask_new.shape)
         context_x, context_y, target_x, target_y = self.convert_data(x_mark_new, x_new, x_mask_new, y_mark_new, y_new, y_mask_new)
+        # print(context_x.shape, context_y.shape, target_x.shape, target_y.shape)
         if len(context_y.shape) == 2:
             context_x = context_x.unsqueeze(0)
             context_y = context_y.unsqueeze(0)

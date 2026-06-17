@@ -100,7 +100,19 @@ class Model(nn.Module):
             exit(1)
 
         # overwrite part of the backbone config
-        ts_backbone_overwrite_config_list = configs.ts_backbone_overwrite_config_list + ["pred_len", "pred_len_max_irr", "task_name", "n_classes"] # additionally overwrite these args
+        mandatory_overwrite_config_list = [
+            "enc_in",
+            "dec_in",
+            "c_out",
+            "features",
+            "pred_len",
+            "pred_len_max_irr",
+            "task_name",
+            "n_classes",
+        ]
+        ts_backbone_overwrite_config_list = list(
+            dict.fromkeys(configs.ts_backbone_overwrite_config_list + mandatory_overwrite_config_list)
+        )
         for config_name in ts_backbone_overwrite_config_list:
             # user-defined list of argument that values from adaptor class will overwrite backbones'
             assert hasattr(configs_backbone, config_name), f"Argument '{config_name}' is not found in config file '{yaml_configs_path}'. Make sure the argument name provided in --backbone_overwrite_config_list is correct!"

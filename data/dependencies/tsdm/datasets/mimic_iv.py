@@ -55,9 +55,9 @@ class MIMIC_IV(MultiFrameDataset):
 
     # fmt: off
     dataset_files = {
-        "admissions"         : "mimic-iv-1.0/core/admissions.csv.gz",
-        "patients"           : "mimic-iv-1.0/core/patients.csv.gz",
-        "transfers"          : "mimic-iv-1.0/core/transfers.csv.gz",
+        "admissions"         : "mimic-iv-1.0/hosp/admissions.csv.gz",
+        "patients"           : "mimic-iv-1.0/hosp/patients.csv.gz",
+        "transfers"          : "mimic-iv-1.0/hosp/transfers.csv.gz",
         "chartevents"        : "mimic-iv-1.0/icu/chartevents.csv.gz",
         "datetimeevents"     : "mimic-iv-1.0/icu/datetimeevents.csv.gz",
         "d_items"            : "mimic-iv-1.0/icu/d_items.csv.gz",

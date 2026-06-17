@@ -210,8 +210,8 @@ class MIMIC_IV_Bilos2021(BaseTask):
     -------------------
 
     Filtering approach. Following De Brouwer et al. [16], we use clinical database MIMIC-III [35],
-    pre-processed to contain 21250 patients’ time series, with 96 features. We also process newly released
-    MIMIC-IV [25, 36] to obtain 17874 patients. The details are in Appendix D.2. The goal is to predict
+    pre-processed to contain 21250 patients’ time series, with 96 features. The current local MIMIC-IV
+    export used by this repository contains 22018 admissions and 96 features. The goal is to predict
     the next three measurements in the 12-hour interval after the observation window of 36 hours.
 
     Table 2 shows that our GRU flow model (Equation 5) mostly outperforms GRU-ODE [16]. Addition-
@@ -266,11 +266,23 @@ class MIMIC_IV_Bilos2021(BaseTask):
         # bd19f7c92461e83521e268c1a235ef845a3dd963/nfe/experiments/gru_ode_bayes/lib/get_data.py#L50-L63
 
         # Standardize the x-values, min-max scale the t values.
-        ts = ds.dataset
-        self.encoder.fit(ts)
-        ts = self.encoder.encode(ts)
+        ts_raw = ds.dataset
+        self.encoder.fit(ts_raw)
+        ts = self.encoder.encode(ts_raw)
         index_encoder = self.encoder.index_encoders["time_stamp"]
         self.observation_time /= (index_encoder.param.xmax + 1)  # type: ignore[assignment]
+
+        # Constant observed columns have std=0 after standardization and would otherwise
+        # become all-NaN, which incorrectly shrinks the feature dimension downstream.
+        zero_variance_columns = ts_raw.columns[
+            ts_raw.notna().any(axis=0) & ts_raw.nunique(dropna=True).le(1)
+        ]
+        if len(zero_variance_columns) > 0:
+            observed_mask = ts_raw.loc[:, zero_variance_columns].notna()
+            ts.loc[:, zero_variance_columns] = ts.loc[:, zero_variance_columns].where(
+                ~observed_mask,
+                0.0,
+            )
 
         # drop values outside 5 sigma range
         ts = ts[(-5 < ts) & (ts < 5)]

@@ -29,110 +29,11 @@ class Data(tsdmDataset):
     - seq_len -> pred_len:
         - 2160 -> 3
         - 2160 -> 720
-    - number of variables: 100
-        - 0: PO Intake
-        - 1: Dextrose 5%
-        - 2: Heparin Sodium
-        - 3: Bicarbonate
-        - 4: Calcium, Total
-        - 5: Chloride
-        - 6: Creatinine
-        - 7: Magnesium
-        - 8: Phosphate
-        - 9: Potassium
-        - 10: Sodium
-        - 11: Urea Nitrogen
-        - 12: Hematocrit
-        - 13: Hemoglobin
-        - 14: MCH
-        - 15: MCV
-        - 16: Platelet Count
-        - 17: RDW
-        - 18: Red Blood Cells
-        - 19: White Blood Cells
-        - 20: PT
-        - 21: PTT
-        - 22: Anion Gap
-        - 23: Glucose
-        - 24: Void
-        - 25: Heparin Sodium (Prophylaxis)
-        - 26: Vancomycin
-        - 27: Pantoprazole (Protonix)
-        - 28: Solution
-        - 29: Hydromorphone (Dilaudid)
-        - 30: Insulin - Regular
-        - 31: Cefazolin
-        - 32: OR Crystalloid Intake
-        - 33: Hydralazine
-        - 34: NaCl 0.9%
-        - 35: Base Excess
-        - 36: Calculated Total CO2
-        - 37: Lactate
-        - 38: pCO2
-        - 39: pH
-        - 40: pO2
-        - 41: Specific Gravity
-        - 42: Foley
-        - 43: OR Urine
-        - 44: OR EBL
-        - 45: Emesis
-        - 46: Potassium Chloride
-        - 47: Piperacillin/Tazobactam (Zosyn)
-        - 48: Propofol
-        - 49: Pre-Admission/Non-ICU Intake
-        - 50: Gastric Meds
-        - 51: Furosemide (Lasix)
-        - 52: Free Water
-        - 53: GT Flush
-        - 54: LR
-        - 55: Norepinephrine
-        - 56: Alanine Aminotransferase (ALT)
-        - 57: Alkaline Phosphatase
-        - 58: Asparate Aminotransferase (AST)
-        - 59: Bilirubin, Total
-        - 60: Basophils
-        - 61: Eosinophils
-        - 62: Lymphocytes
-        - 63: Monocytes
-        - 64: Neutrophils
-        - 65: Albumin
-        - 66: Pre-Admission
-        - 67: Acetaminophen-IV
-        - 68: Magnesium Sulfate
-        - 69: Insulin - Humalog
-        - 70: Fentanyl
-        - 71: Insulin - Glargine
-        - 72: Magnesium Sulfate (Bolus)
-        - 73: Fentanyl (Concentrate)
-        - 74: Calcium Gluconate
-        - 75: K Phos
-        - 76: Cefepime
-        - 77: Piggyback
-        - 78: Morphine Sulfate
-        - 79: Sterile Water
-        - 80: OR Cell Saver Intake
-        - 81: Packed Red Blood Cells
-        - 82: KCL (Bolus)
-        - 83: Albumin 5%
-        - 84: Dexmedetomidine (Precedex)
-        - 85: Phenylephrine
-        - 86: Nitroglycerin
-        - 87: Oral Gastric
-        - 88: Lorazepam (Ativan)
-        - 89: Metoprolol
-        - 90: D5 1/2NS
-        - 91: Straight Cath
-        - 92: TF Residual
-        - 93: Ceftriaxone
-        - 94: Midazolam (Versed)
-        - 95: Nasogastric
-        - 96: Pantoprazole (Protonix) Continuous
-        - 97: Stool
-        - 98: TF Residual Output
-        - 99: Fecal Bag
-
-        Note: Originally, there are (0~101) variables, but 54 (Famotidine (Pepcid)) and 77 (Metronidazole) in original index are removed in tsdm, and remaining variables are reindexed here.
-    - number of samples: 17874 (14477 + 1609 + 1788)
+    - number of variables: 96
+        - Current local export keeps `Value_label_0` to `Value_label_95` in `~/.tsdm/rawdata/MIMIC_IV_Bilos2021/full_dataset.csv`.
+        - The exact `label_code -> label` mapping is generated into `processed/label_dict.csv` by `data/dependencies/MIMIC_IV/preprocess/6_DataMerging.py`.
+        - That `label_dict.csv` is not present in the remaining local artifacts on this machine, so the previous bundled 100-variable name list has been removed instead of leaving a stale mapping.
+    - number of samples: 22018 (17834 + 1982 + 2202)
     '''
     def __init__(
         self, 
@@ -174,7 +75,7 @@ class Data(tsdmDataset):
         self._preprocess_base(task) # implemented in parent class
 
     def _get_sample_index(self):
-        N_SAMPLES = 17874
+        N_SAMPLES = 22018
         sample_index_all = torch.arange(N_SAMPLES)
         sample_index_train_val, sample_index_test = train_test_split(sample_index_all, test_size=0.1, shuffle = False)
         sample_index_train, sample_index_val = train_test_split(sample_index_train_val, test_size=0.1, shuffle = False)

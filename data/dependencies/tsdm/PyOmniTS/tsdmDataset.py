@@ -56,7 +56,7 @@ class tsdmDataset(Dataset):
             "y": y,
             "y_mark": y_mark,
             "y_mask": y_mask,
-            "sample_ID": self.sample_index[index],
+            "sample_ID": sample_ID,
             "_configs": self.configs, # only used by the collate_fns
             "_L_TOTAL": self.L_TOTAL # only used by the collate_fns
         }

@@ -14,6 +14,7 @@ get_dataset_info "$dataset_name" "$dataset_subset_name" # Get dataset informatio
 
 model_name="$(basename "$(dirname "$(readlink -f "$0")")")" # folder name
 
+echo $n_variables
 seq_len=2160
 for pred_len in 3; do
     for ts_backbone_name in \

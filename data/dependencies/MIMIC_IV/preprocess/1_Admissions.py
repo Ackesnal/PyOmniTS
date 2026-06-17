@@ -6,12 +6,12 @@ import numpy as np
 import pandas as pd
 
 file_path = sys.argv[1]
-fn = 'core/admissions.csv.gz'
+fn = 'hosp/admissions.csv.gz'
 
 adm = pd.read_csv(file_path + fn, compression='gzip')
 
 #keep only patients present in patients data
-patients_df=pd.read_csv(file_path + 'core/patients.csv.gz')
+patients_df=pd.read_csv(file_path + 'hosp/patients.csv.gz')
 adm_dob=pd.merge(patients_df[["subject_id","anchor_age"]],adm,on="subject_id")
 
 df=adm.groupby("subject_id")["hadm_id"].nunique()

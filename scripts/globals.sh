@@ -30,7 +30,7 @@ get_dataset_info() {
             ;;
         MIMIC_IV)
             dataset_root_path="storage/datasets/MIMIC_IV"
-            n_variables=100
+            n_variables=96
             ;;
         P12)
             dataset_root_path="storage/datasets/P12"

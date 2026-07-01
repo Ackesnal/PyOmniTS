@@ -16,17 +16,17 @@ model_name="$(basename "$(dirname "$(readlink -f "$0")")")"
 model_id=$model_name
 
 seq_len=2160
-d_model=64
+d_model=32
 for pred_len in 3; do
     $launch_command main.py \
     --is_training 1 \
     --collate_fn "collate_fn" \
     --loss "MSE" \
-    --dropout 0.2 \
+    --dropout 0.1 \
     --d_model $d_model \
-    --d_ff 256 \
-    --n_layers 3 \
-    --n_heads 16 \
+    --d_ff 128 \
+    --n_layers 2 \
+    --n_heads 4 \
     --use_multi_gpu $use_multi_gpu \
     --dataset_root_path $dataset_root_path \
     --model_id $model_id \
@@ -40,10 +40,10 @@ for pred_len in 3; do
     --dec_in $n_variables \
     --c_out $n_variables \
     --train_epochs 100 \
-    --patience 20 \
+    --patience 10 \
     --val_interval 1 \
     --itr 5 \
-    --batch_size 64 \
+    --batch_size 8 \
     --learning_rate 5e-4 \
     --lr_scheduler "CosineAnnealingLR"
 done

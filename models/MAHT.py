@@ -122,103 +122,7 @@ def ensure_non_empty_rows(mask: Tensor) -> Tensor:
     return torch.where(row_has_key, mask, fallback)
 
 
-class StageOneEncoder(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
-        super(StageOneEncoder, self).__init__()
-        self.window_predictor = nn.Sequential(
-            nn.RMSNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, 1),
-        )
-        self.attn_norm = nn.RMSNorm(d_model)
-        self.qkv = nn.Linear(d_model, d_model * 3)
-        self.n_heads = n_heads
-        self.out = nn.Linear(d_model, d_model)
-        self.droppath1 = DropPath(drop_prob=dropout)
-        
-        self.ffn_norm = nn.RMSNorm(d_model)
-        self.up = nn.Linear(d_model, d_ff)
-        self.down = nn.Linear(d_ff, d_model)
-        self.act = nn.GELU()
-        self.droppath2 = DropPath(drop_prob=dropout)
-
-    def forward(self, x, x_mark, x_mask, tau_time=0.1, eps=1e-6):
-        """
-        Forward pass for the stage one encoder.
-
-        Args:
-            x: Input tensor of shape (B, V, L, D).
-            x_mark: Time mark tensor of shape (B, V, L).
-            x_mask: Mask tensor of shape (B, V, L).
-
-        Returns:
-            Encoded tensor of shape (B, V, L, D).
-        """
-        B, V, L, D = x.shape
-        
-        # 1. Predict the attention window for each event.
-        time_pred = torch.sigmoid(self.window_predictor(x))  # B, V, L, 1
-        # print(time_pred.max(), time_pred.min(), time_pred.mean(), time_pred.std(), time_pred.median())
-
-        # 2. Query time and key time
-        query_time = x_mark.reshape(B, V, L, 1)  # B, V, L, 1
-        key_time = x_mark.reshape(B, V, 1, L)    # B, V, 1, L
-
-        # 3. Calculate the time boundary for each event based on the predicted window.
-        left_boundary = query_time - time_pred
-        left_boundary = left_boundary.clamp(min=0.0, max=1.0)  # B, V, L, 1
-
-        right_boundary = query_time.clamp(min=0.0, max=1.0)  # B, V, L, 1
-
-        # 4. Calculate the time soft gate as additive log-bias.
-        # Equivalent to:
-        #   log(sigmoid((key_time - left_boundary) / tau_time))
-        # + log(sigmoid((right_boundary - key_time) / tau_time))
-        #
-        # This is more numerically stable than:
-        #   torch.log(left_gate * right_gate)
-        tau = max(tau_time, 1e-6)
-
-        left_time_bias = F.logsigmoid(
-            (key_time - left_boundary) / tau
-        )  # B, V, L, L
-
-        right_time_bias = F.logsigmoid(
-            (right_boundary - key_time) / tau
-        )  # B, V, L, L
-
-        attention_bias = left_time_bias + right_time_bias  # B, V, L, L
-        
-        # 5. Calculate the valid query-key mask.
-        query_mask = x_mask.reshape(B, V, L, 1)  # B, V, L, 1
-        key_mask = x_mask.reshape(B, V, 1, L)    # B, V, 1, L
-
-        pair_mask = query_mask & key_mask        # B, V, L, L
-        hard_mask = ensure_non_empty_rows(pair_mask)
-
-        # 6. Apply hard mask.
-        attention_bias = attention_bias.masked_fill(~hard_mask, float("-inf"))
-
-        # 7. Expand to heads.
-        attention_bias = attention_bias.unsqueeze(2).expand(
-            -1, -1, self.n_heads, -1, -1
-        )  # B, V, H, L, L
-        
-        # 5. Self-attention
-        q, k, v = self.qkv(self.attn_norm(x)).chunk(3, dim=-1) # B, V, L, D each
-        q = q.reshape(B, V, L, self.n_heads, D // self.n_heads).permute(0, 1, 3, 2, 4) # B, V, H, L, D_head
-        k = k.reshape(B, V, L, self.n_heads, D // self.n_heads).permute(0, 1, 3, 2, 4) # B, V, H, L, D_head
-        v = v.reshape(B, V, L, self.n_heads, D // self.n_heads).permute(0, 1, 3, 2, 4) # B, V, H, L, D_head
-        x = self.droppath1(self.out(torch.nn.functional.scaled_dot_product_attention(q, k, v, attention_bias).permute(0, 1, 3, 2, 4).reshape(B, V, L, D)), mask=x_mask) + x
-        
-        # 5. Feedforward Network
-        x = self.droppath2(self.down(self.act(self.up(self.ffn_norm(x)))), mask=x_mask) + x # B, V, L, D
-        
-        return x
-    
-
-class StageTwoEncoder(nn.Module):
+class StageEncoder(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -226,118 +130,154 @@ class StageTwoEncoder(nn.Module):
         d_ff: int,
         n_variates: int,
         dropout: float,
+        stage: int,
     ):
-        super(StageTwoEncoder, self).__init__()
-        self.window_predictor = nn.Sequential(
-            nn.RMSNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, 1),
-        )
-        self.variate_predictor = nn.Sequential(
-            nn.RMSNorm(d_model),
-            nn.Linear(d_model, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, n_variates),
-        )
+        super(StageEncoder, self).__init__()
+        
+        self.stage = stage
         self.n_variates = n_variates
-        self.attn_norm = nn.RMSNorm(d_model)
-        self.qkv = nn.Linear(d_model, d_model * 3)
-        self.n_heads = n_heads
-        self.out = nn.Linear(d_model, d_model)
-        self.droppath1 = DropPath(drop_prob=dropout)
+        
+        if self.stage in [1, 2]:
+            self.window_predictor = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, 1),
+            )
+            
+        if self.stage in [2]:
+            self.variate_predictor = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, n_variates),
+            )
+        
+        if self.stage in [1, 2, 3]:
+            self.attn_norm = nn.LayerNorm(d_model)
+            self.qkv = nn.Linear(d_model, d_model * 3)
+            self.n_heads = n_heads
+            self.out = nn.Linear(d_model, d_model)
+            self.droppath1 = DropPath(drop_prob=dropout)
 
-        self.ffn_norm = nn.RMSNorm(d_model)
+        self.ffn_norm = nn.LayerNorm(d_model)
         self.up = nn.Linear(d_model, d_ff)
         self.down = nn.Linear(d_ff, d_model)
         self.act = nn.GELU()
         self.droppath2 = DropPath(drop_prob=dropout)
 
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        for module in [
+            self.window_predictor if hasattr(self, "window_predictor") else None,
+            self.variate_predictor if hasattr(self, "variate_predictor") else None,
+            self.attn_norm if hasattr(self, "attn_norm") else None,
+            self.qkv if hasattr(self, "qkv") else None,
+            self.out if hasattr(self, "out") else None,
+            self.ffn_norm if hasattr(self, "ffn_norm") else None,
+            self.up if hasattr(self, "up") else None,
+            self.down if hasattr(self, "down") else None,
+        ]:
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
     def forward(self, x, x_mark, x_mask, tau_time=0.1, eps=1e-6, tau_variate=0.1):
         """
-        Forward pass for the stage two encoder.
+        Forward pass for a stage encoder.
 
         Args:
             x: Input tensor of shape (B, N, D).
-            x_mark: Packed time mark tensor of shape (B, N), encoded as variate_index + timestamp.
-            x_mask: Mask tensor of shape (B, N).
+            x_mark: Packed time mark tensor of shape (B, N) or (B, N, 1),
+                encoded as variate_index + timestamp.
+            x_mask: Mask tensor of shape (B, N) or (B, N, 1).
 
         Returns:
             Encoded tensor of shape (B, N, D).
         """
         B, N, D = x.shape
-        
-        # 1. Predict time window and variate logits
-        time_pred = torch.sigmoid(self.window_predictor(x)).squeeze(-1)  # B, N
-        variate_logits = self.variate_predictor(x)                       # B, N, V
+        if x_mark.dim() == 3:
+            x_mark = x_mark.squeeze(-1)
+        if x_mask.dim() == 3:
+            x_mask = x_mask.squeeze(-1)
 
-        # 2. Decode packed marks into per-token variate ids and timestamps
-        source_variate = torch.floor(x_mark).clamp(
-            min=0,
-            max=self.n_variates - 1
-        ).long()  # B, N
+        if self.stage != 0:
+            if self.stage in [1, 2]:
+                # First get the original event time by subtracting the variate index
+                source_variate = torch.floor(x_mark).clamp(
+                    min=0,
+                    max=self.n_variates - 1
+                ).long()  # B, N
+                event_time = x_mark - source_variate.to(x_mark.dtype)  # B, N
+                
+                # Second, compute the observation time window for each event
+                time_pred = torch.sigmoid(self.window_predictor(x)).squeeze(-1)  # B, N
+                
+                # Third, compute the left and right boundaries for each event
+                left_boundary = (event_time - time_pred).unsqueeze(-1)  # B, N, 1
+                right_boundary = event_time.unsqueeze(-1)  # B, N, 1
+                key_time = event_time.unsqueeze(1)  # B, 1, N
+                
+                # Finally, compute the soft time gate (attention bias)
+                left_time_bias = F.logsigmoid(
+                    (key_time - left_boundary) / max(tau_time, eps)
+                )  # B, N, N
+                right_time_bias = F.logsigmoid(
+                    (right_boundary - key_time) / max(tau_time, eps)
+                )  # B, N, N
+                attention_bias = left_time_bias + right_time_bias  # B, N, N
+            else:
+                attention_bias = torch.zeros((B, N, N), dtype=x.dtype, device=x.device)
 
-        event_time = x_mark - source_variate.to(x_mark.dtype)  # B, N
+            if self.stage == 1:
+                # For stage 1, we only allow attention between events of the same variate
+                pair_mask = (
+                    x_mask.unsqueeze(-1)
+                    & x_mask.unsqueeze(1)
+                    & (source_variate.unsqueeze(-1) == source_variate.unsqueeze(1))
+                )  # B, N, N
+            elif self.stage == 2:
+                # For stage 2, we allow attention between events of different variates, 
+                # but we add a soft variate gate (variate-based bias)
+                variate_logits = self.variate_predictor(x)  # B, N, V
+                key_variate_index = source_variate.unsqueeze(1).expand(-1, N, -1)  # B, N, N
+                selected_variate_logits = variate_logits.gather(
+                    dim=-1,
+                    index=key_variate_index
+                )  # B, N, N
+                attention_bias = attention_bias + F.logsigmoid(
+                    selected_variate_logits / max(tau_variate, eps)
+                )  # B, N, N
+                pair_mask = x_mask.unsqueeze(-1) & x_mask.unsqueeze(1)  # B, N, N
+            elif self.stage == 3:
+                # For stage 3, we allow attention between all events, regardless of variate
+                pair_mask = x_mask.unsqueeze(-1) & x_mask.unsqueeze(1)  # B, N, N
+            else:
+                raise ValueError(f"Unsupported stage: {self.stage}")
 
-        # 3. Calculate time boundaries
-        left_boundary = (event_time - time_pred).clamp(
-            min=0.0,
-            max=1.0
-        ).unsqueeze(-1)  # B, N, 1
+            # Ensure that each row has at least one True value to avoid empty rows in attention
+            hard_mask = ensure_non_empty_rows(pair_mask)
+            attention_bias = attention_bias.masked_fill(~hard_mask, float("-inf"))
+            attention_bias = attention_bias.unsqueeze(1).expand(
+                -1, self.n_heads, -1, -1
+            )  # B, H, N, N
 
-        right_boundary = event_time.clamp(min=0.0, max=1.0).unsqueeze(-1)  # B, N, 1
+            # Self-attention with scaled dot-product attention
+            q, k, v = self.qkv(self.attn_norm(x)).chunk(3, dim=-1) # B, N, D each
+            q = q.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
+            k = k.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
+            v = v.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
+            x = self.droppath1(
+                self.out(
+                    torch.nn.functional.scaled_dot_product_attention(q, k, v, attention_bias)
+                    .permute(0, 2, 1, 3)
+                    .reshape(B, N, D)
+                ),
+                mask=x_mask,
+            ) + x
 
-        # 4. Time soft gate, written as additive log-bias
-        key_time = event_time.unsqueeze(1)  # B, 1, N
-
-        left_time_bias = F.logsigmoid(
-            (key_time - left_boundary) / max(tau_time, eps)
-        )  # B, N, N
-
-        right_time_bias = F.logsigmoid(
-            (right_boundary - key_time) / max(tau_time, eps)
-        )  # B, N, N
-
-        time_bias = left_time_bias + right_time_bias  # B, N, N
-
-        # 5. Variate soft gate
-        # For each query i and key j, select query i's logit for key j's variate id.
-        key_variate_index = source_variate.unsqueeze(1).expand(
-            -1, N, -1
-        )  # B, N, N
-
-        selected_variate_logits = variate_logits.gather(
-            dim=-1,
-            index=key_variate_index
-        )  # B, N, N
-
-        variate_bias = F.logsigmoid(
-            selected_variate_logits / max(tau_variate, eps)
-        )  # B, N, N
-
-        # 6. Padding mask
-        pair_mask = x_mask.unsqueeze(-1) & x_mask.unsqueeze(1)  # B, N, N
-        hard_mask = ensure_non_empty_rows(pair_mask)
-
-        # 7. Final additive attention bias
-        attention_bias = time_bias + variate_bias
-        attention_bias = attention_bias.masked_fill(~hard_mask, float("-inf"))
-
-        # 8. Expand to heads
-        attention_bias = attention_bias.unsqueeze(1).expand(
-            -1, self.n_heads, -1, -1
-        )  # B, H, N, N
-        
-        # 9. Self-attention
-        q, k, v = self.qkv(self.attn_norm(x)).chunk(3, dim=-1) # B, N, D each
-        q = q.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
-        k = k.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
-        v = v.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
-        x = self.droppath1(self.out(torch.nn.functional.scaled_dot_product_attention(q, k, v, attention_bias).permute(0, 2, 1, 3).reshape(B, N, D)), mask=x_mask) + x
-
-        # 10. Feedforward network
         x = self.droppath2(self.down(self.act(self.up(self.ffn_norm(x)))), mask=x_mask) + x # B, N, D
-
+        
         return x
 
 
@@ -350,38 +290,68 @@ class IMTS_SubModel(nn.Module):
         self.n_variates = configs.enc_in
 
         self.value_embedding = nn.Parameter(torch.empty(self.n_variates, self.d_model))
+        self.value_embedding_act = nn.GELU()
         self.time_embedding = nn.Linear(1, self.d_model)
+        self.time_embedding_act = nn.GELU()
         self.variate_embedding = nn.Parameter(torch.empty(self.n_variates, self.d_model))
-        self.event_norm = nn.RMSNorm(self.d_model)
-
+        self.event_missing_embedding = nn.Embedding(2, self.d_model)
+        self.temporal_missing_embedding = nn.Linear(1, self.d_model)
+        self.missing_embedding_act = nn.GELU()
         self.query = nn.Parameter(torch.rand(1, 1, 1, self.d_model))
-        self.query_time_embedding = nn.Linear(1, self.d_model)
-        self.query_norm = nn.RMSNorm(self.d_model)
+        self.event_norm = nn.LayerNorm(self.d_model)
 
-        self.stage1_encoder = nn.ModuleList([
-            StageOneEncoder(
-                d_model=self.d_model,
-                n_heads=configs.n_heads,
-                d_ff=configs.d_ff,
-                dropout=configs.dropout,
-            )
-            for _ in range(configs.n_layers)
-        ])
-        self.stage2_encoder = nn.ModuleList([
-            StageTwoEncoder(
+        self.stage0_encoder = nn.ModuleList([
+            StageEncoder(
                 d_model=self.d_model,
                 n_heads=configs.n_heads,
                 d_ff=configs.d_ff,
                 n_variates=self.n_variates,
                 dropout=configs.dropout,
+                stage=0,
+            )
+            for _ in range(configs.n_layers) # 1)
+        ])
+        self.stage1_encoder = nn.ModuleList([
+            StageEncoder(
+                d_model=self.d_model,
+                n_heads=configs.n_heads,
+                d_ff=configs.d_ff,
+                n_variates=self.n_variates,
+                dropout=configs.dropout,
+                stage=1,
+            )
+            for _ in range(configs.n_layers)
+        ])
+        self.stage2_encoder = nn.ModuleList([
+            StageEncoder(
+                d_model=self.d_model,
+                n_heads=configs.n_heads,
+                d_ff=configs.d_ff,
+                n_variates=self.n_variates,
+                dropout=configs.dropout,
+                stage=2,
+            )
+            for _ in range(configs.n_layers)
+        ])
+        self.stage3_encoder = nn.ModuleList([
+            StageEncoder(
+                d_model=self.d_model,
+                n_heads=configs.n_heads,
+                d_ff=configs.d_ff,
+                n_variates=self.n_variates,
+                dropout=configs.dropout,
+                stage=3,
             )
             for _ in range(configs.n_layers)
         ])
         
+        self.output_norm = nn.LayerNorm(self.d_model)
         self.output_projection = nn.Sequential(
             nn.Linear(self.d_model, configs.d_ff),
             nn.GELU(),
-            nn.Linear(configs.d_ff, 1),
+            nn.Linear(configs.d_ff, self.d_model),
+            nn.GELU(),
+            nn.Linear(self.d_model, 1),
         )
 
         self.reset_parameters()
@@ -390,123 +360,113 @@ class IMTS_SubModel(nn.Module):
         model_std = self.d_model ** -0.5
         nn.init.normal_(self.value_embedding, mean=0.0, std=model_std)
         nn.init.normal_(self.variate_embedding, mean=0.0, std=model_std)
+        nn.init.normal_(self.event_missing_embedding.weight, mean=0.0, std=model_std)
         nn.init.normal_(self.query, mean=0.0, std=model_std)
+        self.time_embedding.reset_parameters()
+        self.temporal_missing_embedding.reset_parameters()
+        for module in self.output_projection:
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+        self.event_norm.reset_parameters()
+        for block in self.stage0_encoder:
+            block.reset_parameters()
+        for block in self.stage1_encoder:
+            block.reset_parameters()
+        for block in self.stage2_encoder:
+            block.reset_parameters()
+        for block in self.stage3_encoder:
+            block.reset_parameters()
+        self.output_norm.reset_parameters()
+        for layer in self.output_projection:
+            if hasattr(layer, "reset_parameters"):
+                layer.reset_parameters()
 
-    def _build_event_embedding(self, x, x_mark, x_mask):
+    def _build_missingness_embedding(self, input_mark, input_mask):
+        input_mask = input_mask > 0
+        event_missing_embed = self.event_missing_embedding(input_mask.long())
+
+        time_axis = input_mark.squeeze(-1).unsqueeze(-1).expand_as(input_mask)
+        observed_time = torch.where(input_mask, time_axis, torch.zeros_like(time_axis))
+        last_observed_time = torch.cummax(observed_time, dim=1).values
+        has_history = input_mask.cumsum(dim=1) > 0
+        temporal_gap = torch.where(has_history, time_axis - last_observed_time, time_axis)
+        temporal_gap = temporal_gap.unsqueeze(-1)
+        temporal_missing_embed = self.temporal_missing_embedding(temporal_gap)
+        
+        missingness_embed = self.missing_embedding_act(event_missing_embed + temporal_missing_embed)
+        return missingness_embed
+
+    def _build_event_embedding(self, x, x_mark, x_mask, y_mark, y_mask):
         batch_size, _, n_variates = x.shape
-        value_embed = torch.einsum("bnv,vd->bnvd", x, self.value_embedding)
-        time_embed = self.time_embedding(x_mark).unsqueeze(2)
-        variate_embed = self.variate_embedding.view(1, 1, n_variates, self.d_model).expand(batch_size, -1, -1, -1)
-        event_embed = self.event_norm(value_embed + time_embed + variate_embed)
+        
+        # Embedding original values and query token
+        value_embed = self.value_embedding_act(torch.einsum("bnv,vd->bnvd", x, self.value_embedding))
+        value_embed  = torch.cat([value_embed, self.query.expand(batch_size, y_mark.shape[1], n_variates, -1)], dim=1) # B, L+L', V, D
+        
+        # Embedding time marks
+        input_mark = torch.cat([x_mark, y_mark], dim=1) # B, L+L', 1
+        time_embed = self.time_embedding_act(self.time_embedding(input_mark)).unsqueeze(2)
+        
+        # Embedding missingness
+        input_mask = torch.cat([x_mask, y_mask], dim=1) # B, L+L', V
+        missingness_embed = self._build_missingness_embedding(input_mark, input_mask)
+        
+        # Embedding variate
+        variate_embed = self.variate_embedding.view(1, 1, n_variates, self.d_model)
+        
+        # Combine all embeddings and normalize
+        event_embed = self.event_norm(value_embed + time_embed + variate_embed + missingness_embed)
         return event_embed
-
-    def _build_query_embedding(self, y_mark, y_mask):
-        batch_size, _, n_variates = y_mask.shape
-        query_embed = self.query 
-        query_time_embed = self.time_embedding(y_mark).unsqueeze(2)
-        query_variate_embed = self.variate_embedding.view(1, 1, n_variates, self.d_model).expand(batch_size, -1, -1, -1)
-        query_embed = self.query_norm(query_embed + query_time_embed + query_variate_embed)
-        return query_embed 
     
-    def _relocate_events_stage1(self, x, x_mark, x_mask, x_len):
+    def _relocate_events(self, events, events_mark, events_mask, x_len):
         """
-        x: (B, L, V, D)
-        x_mark: (B, L, 1)
-        x_mask: (B, L, V)
+        events: (B, L, V, D)
+        events_mark: (B, L, 1)
+        events_mask: (B, L, V)
         x_len: int, length of the original x portion (positions >= x_len belong to y)
         """
-        B, L, V, D = x.shape
-        
-        # 1. Reshape x, x_mark, x_mask to (B, V, L, D), (B, 1, L, 1), (B, V, L)
-        x = x.permute(0, 2, 1, 3) # B, V, L, D
-        x_mark = x_mark.reshape(B, 1, L) # B, 1, L
-        x_mask = x_mask.permute(0, 2, 1) # B, V, L
-        
-        # 2. Get the maximum event length for each variate
-        x_mask = (x_mask == 1) # B, V, L
-        event_len_max = int(x_mask.sum(dim=2).max().item())
-        
-        # 3. New allocation for the input events, with shape (B, V, event_len_max, D)
-        x_new = x.new_zeros((B, V, event_len_max, D)) # B, V, event_len_max, D
-        x_mask_new = torch.zeros((B, V, event_len_max), dtype=torch.bool, device=x.device) # B, V, event_len_max
-        x_mark_new = x_mark.new_zeros((B, V, event_len_max)) # B, V, event_len_max
-        
-        # 4. For each True position in mask_m, compute its new position after compaction
-        #    Example: [False, True, True, False, True, True]
-        #    ranks:   [-1,    0,    1,    1,     2,    3]
-        ranks = x_mask.long().cumsum(dim=2) - 1
-        
-        # 5. Get indices of selected tokens
-        b_idx, v_idx, old_pos_idx = x_mask.nonzero(as_tuple=True)
-        new_pos_idx = ranks[b_idx, v_idx, old_pos_idx] # (num_selected_tokens,)
-        
-        # 6. Copy selected tokens from x to x_new and re-generate the mask
-        x_new[b_idx, v_idx, new_pos_idx] = x[b_idx, v_idx, old_pos_idx]
-        x_mask_new[b_idx, v_idx, new_pos_idx] = True
-        x_mark_new[b_idx, v_idx, new_pos_idx] = x_mark[b_idx, 0, old_pos_idx]
-        
-        # 7. Build y-position map: mark which compacted positions came from y (old_pos >= x_len)
-        #    and record the original l-index within y for each y-token
-        y_mask_new = torch.zeros((B, V, event_len_max), dtype=torch.bool, device=x.device)
-        y_orig_l_new = torch.full((B, V, event_len_max), -1, dtype=torch.long, device=x.device)
-        is_y = old_pos_idx >= x_len
-        y_mask_new[b_idx[is_y], v_idx[is_y], new_pos_idx[is_y]] = True
-        y_orig_l_new[b_idx[is_y], v_idx[is_y], new_pos_idx[is_y]] = (old_pos_idx[is_y] - x_len).long()
-        
-        return x_new, x_mark_new, x_mask_new, y_mask_new, y_orig_l_new
-    
-    def _relocate_events_stage2(self, x, x_mark, x_mask, y_mask, y_orig_l):
-        """
-        x: (B, V, L, D)
-        x_mark: (B, V, L)
-        x_mask: (B, V, L)
-        y_mask: (B, V, L), bool mask indicating which positions in stage1 output came from y
-        y_orig_l: (B, V, L), original l-index in y for each y-token (-1 for non-y tokens)
-        """
-        B, V, L, D = x.shape
-        
-        # 1. Reshape x_mark to add variate information
-        x = x.reshape(B, V*L, D) # B, V*L, D
-        x_mask = x_mask.reshape(B, V*L) # B, V*L
-        y_mask = y_mask.reshape(B, V*L) # B, V*L
-        y_orig_l = y_orig_l.reshape(B, V*L) # B, V*L
-        # v_flat[i] = variate index for flat position i in V*L
-        v_flat = torch.arange(V, device=x.device).unsqueeze(1).expand(V, L).reshape(V * L) # V*L
-        x_mark = x_mark + torch.arange(V, device=x_mark.device).unsqueeze(0).unsqueeze(2) # B, V, L
-        x_mark = x_mark.reshape(B, V*L) # B, V*L
-        
-        # 2. Get the maximum length for each batch
-        batch_len_max = int(x_mask.sum(dim=1).max().item())
-        
-        # 3. New allocation for the input events, with shape (B, V, event_len_max, D)
-        x_new = x.new_zeros((B, batch_len_max , D)) # B, V, event_len_max, D
-        x_mask_new = torch.zeros((B, batch_len_max ), dtype=torch.bool, device=x.device) # B, V, event_len_max
-        x_mark_new = x_mark.new_zeros((B, batch_len_max )) # B, V, event_len_max
-        
-        # 4. For each True position in mask_m, compute its new position after compaction
-        #    Example: [False, True, True, False, True, True]
-        #    ranks:   [-1,    0,    1,    1,     2,    3]
-        ranks = x_mask.long().cumsum(dim=1) - 1
-        
-        # 5. Get indices of selected tokens
-        b_idx, old_pos_idx = x_mask.nonzero(as_tuple=True)
+        B, total_len, V, D = events.shape
+
+        # 1. Pack events into a single per-sample sequence and encode variate ids into the mark.
+        events = events.permute(0, 2, 1, 3).reshape(B, V * total_len, D) # B, V*L, D
+        events_mask = (events_mask.permute(0, 2, 1).reshape(B, V * total_len) == 1) # B, V*L
+        variate_offset = torch.arange(V, device=events_mark.device, dtype=events_mark.dtype).view(1, V, 1)
+        events_mark = (
+            events_mark.reshape(B, 1, total_len).expand(-1, V, -1) + variate_offset
+        ).reshape(B, V * total_len, 1) # B, V*L, 1
+
+        # 2. Get the maximum packed length for each batch.
+        batch_len_max = int(events_mask.sum(dim=1).max().item())
+
+        # 3. Compact the valid events into a dense batch-major sequence.
+        events_new = events.new_zeros((B, batch_len_max, D)) # B, L_M, D
+        events_mask_new = torch.zeros((B, batch_len_max, 1), dtype=torch.bool, device=events.device) # B, L_M, 1
+        events_mark_new = events_mark.new_zeros((B, batch_len_max, 1)) # B, L_M, 1
+
+        # 4. For each True position in mask_m, compute its new position after compaction.
+        ranks = events_mask.long().cumsum(dim=1) - 1
+
+        # 5. Get indices of selected tokens.
+        b_idx, old_pos_idx = events_mask.nonzero(as_tuple=True)
         new_pos_idx = ranks[b_idx, old_pos_idx] # (num_selected_tokens,)
-        
-        # 6. Copy selected tokens from x to x_new and re-generate the mask
-        x_new[b_idx, new_pos_idx] = x[b_idx, old_pos_idx]
-        x_mask_new[b_idx, new_pos_idx] = True
-        x_mark_new[b_idx, new_pos_idx] = x_mark[b_idx, old_pos_idx]
-        
-        # 7. Build y-position map: propagate y tracking and original (l, v) indices through stage2 compaction
-        y_mask_new = torch.zeros((B, batch_len_max), dtype=torch.bool, device=x.device)
-        y_orig_l_new = torch.full((B, batch_len_max), -1, dtype=torch.long, device=x.device)
-        y_orig_v_new = torch.full((B, batch_len_max), -1, dtype=torch.long, device=x.device)
-        is_y = y_mask[b_idx, old_pos_idx]
+
+        # 6. Copy selected tokens into the compacted tensors.
+        events_new[b_idx, new_pos_idx] = events[b_idx, old_pos_idx]
+        events_mask_new[b_idx, new_pos_idx, 0] = True
+        events_mark_new[b_idx, new_pos_idx, 0] = events_mark[b_idx, old_pos_idx, 0]
+
+        # 7. Keep y-token positions and their original (l, v) indices for decoding.
+        y_mask_new = torch.zeros((B, batch_len_max), dtype=torch.bool, device=events.device)
+        y_orig_l_new = torch.full((B, batch_len_max), -1, dtype=torch.long, device=events.device)
+        y_orig_v_new = torch.full((B, batch_len_max), -1, dtype=torch.long, device=events.device)
+        l_flat = torch.arange(total_len, device=events.device).repeat(V) # V*L
+        v_flat = torch.arange(V, device=events.device).unsqueeze(1).expand(V, total_len).reshape(V * total_len) # V*L
+        is_y = l_flat[old_pos_idx] >= x_len
         y_mask_new[b_idx[is_y], new_pos_idx[is_y]] = True
-        y_orig_l_new[b_idx[is_y], new_pos_idx[is_y]] = y_orig_l[b_idx[is_y], old_pos_idx[is_y]]
+        y_orig_l_new[b_idx[is_y], new_pos_idx[is_y]] = (l_flat[old_pos_idx[is_y]] - x_len).long()
         y_orig_v_new[b_idx[is_y], new_pos_idx[is_y]] = v_flat[old_pos_idx[is_y]]
         
-        return x_new, x_mark_new, x_mask_new, y_mask_new, y_orig_l_new, y_orig_v_new
+        return events_new, events_mark_new, events_mask_new, y_mask_new, y_orig_l_new, y_orig_v_new
 
     def forward(
         self,
@@ -521,44 +481,39 @@ class IMTS_SubModel(nn.Module):
         x_len = x_mark.shape[1]
         
         # 1. Embedding inputs and queries
-        x = self._build_event_embedding(x, x_mark, x_mask)
-        y = self._build_query_embedding(y_mark, y_mask)
+        events = self._build_event_embedding(x, x_mark, x_mask, y_mark, y_mask)
+        events_mark = torch.cat([x_mark, y_mark], dim=1) # B, L+L', 1
+        events_mask = torch.cat([x_mask, y_mask], dim=1) # B, L+L', V
         
-        # 2. Concatenate x and y along the sequence dimension to get the input for encoder
-        new_x = torch.cat([x, y], dim=1) # B, L+L', V, D
-        new_x_mark = torch.cat([x_mark, y_mark], dim=1) # B, L+L', 1
-        new_x_mask = torch.cat([x_mask, y_mask], dim=1) # B, L+L', V
-        
-        # 2. Stage 1
-        x, x_mark, x_mask, y_mask_s1, y_orig_l_s1 = self._relocate_events_stage1(new_x, new_x_mark, new_x_mask, x_len)
-        # x: B, V, L, D
-        # x_mark: B, V, L
-        # x_mask: B, V, L
-        # y_mask_s1: B, V, L (True where position came from y)
-        # y_orig_l_s1: B, V, L (original l-index in y for y-tokens)
+        # 2. Relocate events once after embedding.
+        events, events_mark, events_mask, y_mask, y_orig_l, y_orig_v = self._relocate_events(
+            events, events_mark, events_mask, x_len
+        )
+        # events: B, N, D
+        # events_mark: B, N, 1
+        # events_mask: B, N, 1
+        # y_mask: B, N (True where position came from y)
+        # y_orig_l: B, N (original l-index in y for y-tokens)
+        # y_orig_v: B, N (original v-index in y for y-tokens)
+        for blk in self.stage0_encoder:
+            events = blk(events, events_mark, events_mask) # B, N, D
         for blk in self.stage1_encoder:
-            x = blk(x, x_mark, x_mask) # B, V, L, D
-        
-        # 3. Stage 2
-        x, x_mark, x_mask, y_mask_s2, y_orig_l_s2, y_orig_v_s2 = self._relocate_events_stage2(x, x_mark, x_mask, y_mask_s1, y_orig_l_s1)
-        # x: B, N, D
-        # x_mark: B, N
-        # x_mask: B, N
-        # y_mask_s2: B, N (True where position came from y)
-        # y_orig_l_s2: B, N (original l-index in y for y-tokens)
-        # y_orig_v_s2: B, N (original v-index in y for y-tokens)
+            events = blk(events, events_mark, events_mask, tau_time=1e-6) # B, N, D
         for blk in self.stage2_encoder:
-            x = blk(x, x_mark, x_mask) # B, N, D
+            events = blk(events, events_mark, events_mask, tau_time=1e-6) # B, N, D
+        for blk in self.stage3_encoder:
+            events = blk(events, events_mark, events_mask) # B, N, D
 
-        # 4. Scatter y-tokens from x back to (B, L', V, D) using tracked original positions
-        B = x.shape[0]
+        # 3. Scatter y-tokens from x back to (B, L', V, D) using tracked original positions
+        B = events.shape[0]
         L_prime = y_mark.shape[1]
-        decoded = x.new_zeros((B, L_prime, n_variates, self.d_model))
-        b_idx_y, n_idx_y = y_mask_s2.nonzero(as_tuple=True)
+        decoded = events.new_zeros((B, L_prime, n_variates, self.d_model))
+        b_idx_y, n_idx_y = y_mask.nonzero(as_tuple=True)
         if b_idx_y.numel() > 0:
-            l_idx_y = y_orig_l_s2[b_idx_y, n_idx_y]
-            v_idx_y = y_orig_v_s2[b_idx_y, n_idx_y]
-            decoded[b_idx_y, l_idx_y, v_idx_y] = x[b_idx_y, n_idx_y]
+            l_idx_y = y_orig_l[b_idx_y, n_idx_y]
+            v_idx_y = y_orig_v[b_idx_y, n_idx_y]
+            decoded[b_idx_y, l_idx_y, v_idx_y] = events[b_idx_y, n_idx_y]
 
+        decoded = self.output_norm(decoded)
         outputs = self.output_projection(decoded).squeeze(-1)
         return outputs #* y_mask.to(outputs.dtype)

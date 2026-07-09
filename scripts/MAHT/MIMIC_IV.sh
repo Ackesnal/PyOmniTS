@@ -1,4 +1,4 @@
-use_multi_gpu=0
+use_multi_gpu=1
 if [ $use_multi_gpu -eq 0 ]; then
     launch_command="python"
 else
@@ -26,7 +26,7 @@ for pred_len in 3; do
     --d_model $d_model \
     --d_ff 128 \
     --n_layers 2 \
-    --n_heads 4 \
+    --n_heads 8 \
     --use_multi_gpu $use_multi_gpu \
     --dataset_root_path $dataset_root_path \
     --model_id $model_id \
@@ -43,7 +43,6 @@ for pred_len in 3; do
     --patience 10 \
     --val_interval 1 \
     --itr 5 \
-    --batch_size 8 \
-    --learning_rate 5e-4 \
-    --lr_scheduler "CosineAnnealingLR"
+    --batch_size 16 \
+    --learning_rate 1e-3
 done

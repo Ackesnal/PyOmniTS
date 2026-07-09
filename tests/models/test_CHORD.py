@@ -2,19 +2,19 @@ import unittest
 
 import torch
 
-from models.MAHT import IMTS_SubModel, Model
+from models.CHORD import IMTS_SubModel, Model
 from utils.configs import get_configs
 
 
-class TestMAHT(unittest.TestCase):
+class TestCHORD(unittest.TestCase):
 
     def test_model(self):
         configs = get_configs(
             args=[
                 "--model_name",
-                "MAHT",
+                "CHORD",
                 "--model_id",
-                "MAHT",
+                "CHORD",
                 "--batch_size",
                 "2",
                 "--seq_len",
@@ -62,9 +62,9 @@ class TestMAHT(unittest.TestCase):
         configs = get_configs(
             args=[
                 "--model_name",
-                "MAHT",
+                "CHORD",
                 "--model_id",
-                "MAHT",
+                "CHORD",
                 "--enc_in",
                 "3",
                 "--dec_in",

@@ -10,6 +10,8 @@ from torch.nn.utils.rnn import pad_sequence
 from utils.ExpConfigs import ExpConfigs
 from utils.globals import logger
 
+# CHORD: Hirar"CH"ical Missingness-aware Transf"OR"mer with "D"ynamic 
+# Attention Scope for Irregular Multivariate Time Series Forecasting
 
 class Model(nn.Module):
     def __init__(self, configs: ExpConfigs):
@@ -309,7 +311,7 @@ class IMTS_SubModel(nn.Module):
                 dropout=configs.dropout,
                 stage=0,
             )
-            for _ in range(configs.n_layers) # 1)
+            for _ in range(configs.n_layers)
         ])
         self.stage1_encoder = nn.ModuleList([
             StageEncoder(

@@ -15,10 +15,10 @@ get_dataset_info "$dataset_name" "$dataset_subset_name"
 model_name="$(basename "$(dirname "$(readlink -f "$0")")")"
 model_id=$model_name
 
-seq_len=36
+seq_len=72
 d_model=32
 for pred_len in 3; do
-    CUDA_VISIBLE_DEVICES=0 $launch_command main.py \
+    $launch_command main.py \
     --is_training 1 \
     --collate_fn "collate_fn" \
     --loss "MSE" \
@@ -37,13 +37,12 @@ for pred_len in 3; do
     --seq_len $seq_len \
     --pred_len $pred_len \
     --enc_in $n_variables \
-    --c_out $n_variables \
     --dec_in $n_variables \
+    --c_out $n_variables \
     --train_epochs 100 \
     --patience 10 \
     --val_interval 1 \
     --itr 5 \
-    --batch_size 8 \
-    --learning_rate 5e-4 \
-    --lr_scheduler "CosineAnnealingLR"
+    --batch_size 128 \
+    --learning_rate 1e-3
 done

@@ -68,3 +68,6 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 models/CSDI/noise
+
+# Training configurations
+configs/

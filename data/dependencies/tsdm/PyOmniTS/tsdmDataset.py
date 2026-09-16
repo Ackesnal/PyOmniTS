@@ -144,6 +144,12 @@ class tsdmDataset(Dataset):
                     for j in range(n_patch_y):
                         observations = y_mark < ((SEQ_LEN + (j + 1) * PATCH_LEN) / self.L_TOTAL)
                         patch_j_end = observations.sum()
+                        if (
+                            self.configs.collate_fn == "collate_fn_patch"
+                            and self.configs.task_name in ["short_term_forecast", "long_term_forecast"]
+                            and j == n_patch_y - 1
+                        ):
+                            patch_j_end = len(y_mark)
                         sample_mask = slice(patch_j_end_previous, patch_j_end)
                         y_patch_j = y[sample_mask]
                         if len(y_patch_j) > self.patch_len_max_irr:
@@ -408,6 +414,8 @@ def collate_fn_patch(
     '''
     patchify version of collate_fn
 
+    For forecasting, the last future patch includes all remaining target rows.
+
     returns:
     - x, x_mask: [BATCH_SIZE, PATCH_LEN_MAX_IRR * N_PATCH, ENC_IN]
     - x_mark: [BATCH_SIZE, PATCH_LEN_MAX_IRR * N_PATCH, 1]
@@ -469,6 +477,8 @@ def collate_fn_patch(
         for j in range(n_patch_y):
             observations = y_mark < ((SEQ_LEN + (j + 1) * PATCH_LEN) / L_TOTAL)
             patch_j_end = observations.sum()
+            if configs.task_name in ["short_term_forecast", "long_term_forecast"] and j == n_patch_y - 1:
+                patch_j_end = len(y_mark)
             sample_mask = slice(patch_j_end_previous, patch_j_end)
             y_patch_j = y[sample_mask]
             if len(y_patch_j) == 0:

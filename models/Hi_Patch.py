@@ -7,8 +7,8 @@ import torch.nn.functional as F
 from einops import *
 from torch import Tensor
 from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.utils import scatter
 from torch_geometric.utils.num_nodes import maybe_num_nodes
-from torch_scatter import scatter
 
 from utils.ExpConfigs import ExpConfigs
 from utils.globals import logger

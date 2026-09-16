@@ -67,7 +67,7 @@ class ExperimentRunner:
         if self.configs.wandb and accelerator.is_main_process:
             import wandb
             wandb.init(
-                project="YOUR_PROJECT_NAME",
+                project="CHORD_Experiments",
                 config={
                     "model_name": self.configs.model_name,
                     "model_id": self.configs.model_id,
@@ -248,6 +248,12 @@ class SweepManager:
                     max_count *= len(ref_values)
             except Exception:
                 continue
+            
+        for attr_name in ("batch_size", "learning_rate"):
+            values = self.configs.get_sweep_values(attr_name)
+            if values:
+                self.hyperparameters_sweep[attr_name] = {"values": values}
+                max_count *= len(values)
         
         if not self.hyperparameters_sweep:
             logger.error("No hyperparameter to be searched, stopping now..")
@@ -268,7 +274,7 @@ class SweepManager:
         hyperparameters, max_count = self.discover_hyperparameters()
         
         sweep_method = "grid" if max_count <= 16 else "bayes"
-        max_count = min(max_count, 16)
+        max_count = min(max_count, 50)
         
         logger.info(
             f"{len(hyperparameters)} hyperparameters and {max_count} runs "
@@ -288,7 +294,7 @@ class SweepManager:
         if accelerator.is_main_process:
             sweep_id = wandb.sweep(
                 sweep=sweep_configuration, 
-                project="YOUR_PROJECT_NAME"
+                project="CHORD_Experiments"
             )
             with open(temp_file_path, mode='w', encoding="utf-8") as f:
                 f.write(sweep_id)
@@ -317,7 +323,7 @@ class SweepManager:
         wandb.agent(
             sweep_id,
             function=sweep_main,
-            project="YOUR_PROJECT_NAME",
+            project="CHORD_Experiments",
             count=max_count
         )
 

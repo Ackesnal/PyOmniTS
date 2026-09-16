@@ -57,12 +57,15 @@ class ExpConfigs:
     use_multi_gpu: int
 
     # training
-    batch_size: int
+    batch_size: int # = field(metadata={"sweep": [16, 32, 64, 128]})
     itr: int
-    learning_rate: float
+    learning_rate: float = field(metadata={"sweep": [5e-4, 1e-3, 2e-3, 5e-3]})
     loss: str
     lr_scheduler: str
     lr_scheduler_gamma: float
+    gate_warmup_epochs: int
+    max_lr: float | None
+    pct_start: float
     n_train_stages: str
     num_workers: int
     patience: int
@@ -90,23 +93,23 @@ class ExpConfigs:
     activation: str
     c_out: int
     channel_independence: int
-    d_ff: int = field(metadata={"sweep": [16, 32, 64, 128, 256, 512, 2048]})
-    d_layers: int = field(metadata={"sweep": [1, 2]})
-    d_model: int = field(metadata={"sweep": [16, 32, 64, 128, 256, 512]})
+    d_ff: int = field(metadata={"sweep": [64, 128, 256, 512, 1024]})
+    d_layers: int # = field(metadata={"sweep": [1, 2, 3]})
+    d_model: int = field(metadata={"sweep": [64, 128, 256, 512]})
     d_timesteps: int
     dec_in: int
-    dropout: float = field(metadata={"sweep": [0.0, 0.1, 0.3, 0.4, 0.5]})
-    e_layers: int = field(metadata={"sweep": [1, 2, 3, 4, 8]})
+    dropout: float # = field(metadata={"sweep": [0.0, 0.1, 0.2]})
+    e_layers: int # = field(metadata={"sweep": [1, 2, 3, 4, 8]})
     embed_type: int
     enc_in: int
     factor: int
     output_attention: int
     hidden_layers: int
     individual: int
-    kernel_size: int = field(metadata={"sweep": [2, 3, 4, 5]})
+    kernel_size: int # = field(metadata={"sweep": [2, 3, 4, 5]})
     moving_avg: int
-    n_heads: int = field(metadata={"sweep": [1, 4, 8]})
-    n_layers: int = field(metadata={"sweep": [1, 2, 3, 4]})
+    n_heads: int = field(metadata={"sweep": [1, 2, 4, 8, 16]})
+    n_layers: int # = field(metadata={"sweep": [1, 2, 3, 4]})
     n_patches_list: list[int]
     node_dim: int
     patch_len: int
@@ -115,40 +118,40 @@ class ExpConfigs:
     revin: int
     revin_affine: int
     scale_factor: int
-    top_k: int = field(metadata={"sweep": [3, 5]})
+    top_k: int # = field(metadata={"sweep": [3, 5]})
     # Adaptor
     ts_backbone_name: str
     ts_backbone_overwrite_config_list: list[str]
     # CRU
     cru_bandwidth: int
     cru_num_basis: int
-    cru_ts: float = field(metadata={"sweep": [0.2, 0.3]})
+    cru_ts: float # = field(metadata={"sweep": [0.2, 0.3]})
     # Informer
     informer_distil: int
     # Latent ODE
     latent_ode_classif: int
-    latent_ode_gen_layers: int = field(metadata={"sweep": [2, 3]})
-    latent_ode_gru_units: int = field(metadata={"sweep": [50, 100]})
+    latent_ode_gen_layers: int # = field(metadata={"sweep": [2, 3]})
+    latent_ode_gru_units: int # = field(metadata={"sweep": [50, 100]})
     latent_ode_linear_classif: int
-    latent_ode_rec_dims: int = field(metadata={"sweep": [30, 40, 100]})
-    latent_ode_rec_layers: int = field(metadata={"sweep": [2, 3, 4]})
-    latent_ode_units: int = field(metadata={"sweep": [50, 300, 500]})
+    latent_ode_rec_dims: int # = field(metadata={"sweep": [30, 40, 100]})
+    latent_ode_rec_layers: int # = field(metadata={"sweep": [2, 3, 4]})
+    latent_ode_units: int # = field(metadata={"sweep": [50, 300, 500]})
     latent_ode_z0_encoder: str
     # Mamba
     mamba_d_conv: int
     mamba_expand: int
     # mTAN
-    mtan_alpha: float = field(metadata={"sweep": [5., 100.]})
-    mtan_num_ref_points: int = field(metadata={"sweep": [8, 16, 32, 64, 128]})
+    mtan_alpha: float # = field(metadata={"sweep": [5., 100.]})
+    mtan_num_ref_points: int # = field(metadata={"sweep": [8, 16, 32, 64, 128]})
     # NeuralFlows
-    neuralflows_flow_layers: int = field(metadata={"sweep": [1, 2, 4, 16]})
+    neuralflows_flow_layers: int # = field(metadata={"sweep": [1, 2, 4, 16]})
     neuralflows_flow_model: str
-    neuralflows_latents: int = field(metadata={"sweep": [15, 20]})
+    neuralflows_latents: int # = field(metadata={"sweep": [15, 20]})
     neuralflows_time_hidden_dim: int
     neuralflows_time_net: str
     # Nonstationary Transformer
-    nonstationarytransformer_p_hidden_dims: list = field(metadata={"sweep": [[8, 8], [16, 16], [32, 32], [64, 64], [128, 128], [256, 256]]})
-    nonstationarytransformer_p_hidden_layers: int = field(metadata={"sweep": [2, 4]})
+    nonstationarytransformer_p_hidden_dims: list # = field(metadata={"sweep": [[8, 8], [16, 16], [32, 32], [64, 64], [128, 128], [256, 256]]})
+    nonstationarytransformer_p_hidden_layers: int #= field(metadata={"sweep": [2, 4]})
     # PatchTST
     patchtst_decomposition: int
     patchtst_fc_dropout: float
@@ -163,11 +166,13 @@ class ExpConfigs:
     scaleformer_scales: list[int]
     # TimeMixer
     timemixer_decomp_method: str
-    timemixer_down_sampling_layers: int = field(metadata={"sweep": [1, 3]})
+    timemixer_down_sampling_layers: int # = field(metadata={"sweep": [1, 3]})
     timemixer_down_sampling_method: str
     timemixer_use_norm: int
     # tPatchGNN
     tpatchgnn_te_dim: int
+    # CHORD
+    gate_warmup_epochs: int = field(metadata={"sweep": [5, 10, 20]})
 
     # Used to be compatible with ipython. Never used
     f: int = 1

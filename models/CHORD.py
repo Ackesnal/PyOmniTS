@@ -57,7 +57,14 @@ class Model(nn.Module):
         if y_mask is None:
             y_mask = torch.ones_like(y, device=y.device, dtype=y.dtype)
         
-        predictions = self.model(x, x_mark, x_mask, y_mark, y_mask)
+        predictions = self.model(
+            x,
+            x_mark,
+            x_mask,
+            y_mark,
+            y_mask,
+            current_epoch=kwargs.get("current_epoch"),
+        )
 
         if self.configs.task_name in ["long_term_forecast", "short_term_forecast"]:
             f_dim = -1 if self.configs.features == "MS" else 0
@@ -124,6 +131,35 @@ def ensure_non_empty_rows(mask: Tensor) -> Tensor:
     return torch.where(row_has_key, mask, fallback)
 
 
+def blend_log_gate(log_gate: Tensor, predicted_weight: float) -> Tensor:
+    """Blend a predicted gate with an always-open global gate in probability space."""
+    if predicted_weight <= 0.0:
+        return torch.zeros_like(log_gate)
+    if predicted_weight >= 1.0:
+        return log_gate
+    return torch.logaddexp(
+        log_gate + math.log(predicted_weight),
+        torch.full_like(log_gate, math.log1p(-predicted_weight)),
+    )
+
+
+class PerVariateLinear(nn.Module):
+    def __init__(self, n_variates: int, in_features: int, out_features: int):
+        super().__init__()
+        self.in_features = in_features
+        self.weight = nn.Parameter(torch.empty(n_variates, out_features, in_features))
+        self.bias = nn.Parameter(torch.empty(n_variates, out_features))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        std = self.in_features ** -0.5
+        nn.init.normal_(self.weight, mean = 0.0, std = std)
+        nn.init.zeros_(self.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.einsum("...vi,voi->...vo", x, self.weight) + self.bias
+
+
 class StageEncoder(nn.Module):
     def __init__(
         self,
@@ -183,8 +219,30 @@ class StageEncoder(nn.Module):
         ]:
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
-
-    def forward(self, x, x_mark, x_mask, tau_time=0.1, eps=1e-6, tau_variate=0.1):
+                
+        for module in [
+            self.window_predictor if hasattr(self, "window_predictor") else None,
+            self.variate_predictor if hasattr(self, "variate_predictor") else None,
+        ]:
+            if module is None:
+                continue
+            for i, m in enumerate(module):
+                if hasattr(m, "reset_parameters"):
+                    m.reset_parameters()
+            nn.init.zeros_(module[-1].weight)
+            nn.init.zeros_(module[-1].bias)
+            
+    def forward(
+        self,
+        x,
+        x_mark,
+        x_mask,
+        tau_time=0.1,
+        eps=1e-6,
+        tau_variate=0.1,
+        query_mask=None,
+        predicted_gate_weight=1.0,
+    ):
         """
         Forward pass for a stage encoder.
 
@@ -202,6 +260,12 @@ class StageEncoder(nn.Module):
             x_mark = x_mark.squeeze(-1)
         if x_mask.dim() == 3:
             x_mask = x_mask.squeeze(-1)
+        x_mask = x_mask.bool()
+        if query_mask is None:
+            query_mask = torch.zeros_like(x_mask)
+        elif query_mask.dim() == 3:
+            query_mask = query_mask.squeeze(-1)
+        query_mask = query_mask.bool() & x_mask
 
         if self.stage != 0:
             if self.stage in [1, 2]:
@@ -214,20 +278,30 @@ class StageEncoder(nn.Module):
                 
                 # Second, compute the observation time window for each event
                 time_pred = torch.sigmoid(self.window_predictor(x)).squeeze(-1)  # B, N
+                # valid_time_pred = time_pred[x_mask]
+                # print(
+                #     valid_time_pred.shape,
+                #     valid_time_pred.max(),
+                #     valid_time_pred.min(),
+                #     valid_time_pred.median(),
+                # )
                 
                 # Third, compute the left and right boundaries for each event
                 left_boundary = (event_time - time_pred).unsqueeze(-1)  # B, N, 1
                 right_boundary = event_time.unsqueeze(-1)  # B, N, 1
                 key_time = event_time.unsqueeze(1)  # B, 1, N
                 
-                # Finally, compute the soft time gate (attention bias)
+                # Compute the soft time gate.
                 left_time_bias = F.logsigmoid(
                     (key_time - left_boundary) / max(tau_time, eps)
                 )  # B, N, N
                 right_time_bias = F.logsigmoid(
                     (right_boundary - key_time) / max(tau_time, eps)
                 )  # B, N, N
-                attention_bias = left_time_bias + right_time_bias  # B, N, N
+                attention_bias = blend_log_gate(
+                    left_time_bias + right_time_bias,
+                    predicted_gate_weight,
+                )  # B, N, N
             else:
                 attention_bias = torch.zeros((B, N, N), dtype=x.dtype, device=x.device)
 
@@ -241,14 +315,19 @@ class StageEncoder(nn.Module):
             elif self.stage == 2:
                 # For stage 2, we allow attention between events of different variates, 
                 # but we add a soft variate gate (variate-based bias)
-                variate_logits = self.variate_predictor(x)  # B, N, V
+                variate_logits = self.variate_predictor(x) # self.variate_predictor_norm(x))  # B, N, V
                 key_variate_index = source_variate.unsqueeze(1).expand(-1, N, -1)  # B, N, N
+
                 selected_variate_logits = variate_logits.gather(
                     dim=-1,
                     index=key_variate_index
                 )  # B, N, N
-                attention_bias = attention_bias + F.logsigmoid(
+                variate_bias = F.logsigmoid(
                     selected_variate_logits / max(tau_variate, eps)
+                )
+                attention_bias = attention_bias + blend_log_gate(
+                    variate_bias,
+                    predicted_gate_weight,
                 )  # B, N, N
                 pair_mask = x_mask.unsqueeze(-1) & x_mask.unsqueeze(1)  # B, N, N
             elif self.stage == 3:
@@ -257,9 +336,14 @@ class StageEncoder(nn.Module):
             else:
                 raise ValueError(f"Unsupported stage: {self.stage}")
 
+            # Query tokens act only as queries; all attention keys are real events.
+            pair_mask = pair_mask & ~query_mask.unsqueeze(1)
+            row_has_key = pair_mask.any(dim=-1)
+
             # Ensure that each row has at least one True value to avoid empty rows in attention
             hard_mask = ensure_non_empty_rows(pair_mask)
-            attention_bias = attention_bias.masked_fill(~hard_mask, float("-inf"))
+            attention_bias = attention_bias.masked_fill(~hard_mask, float("-10000"))
+            # print(attention_bias)
             attention_bias = attention_bias.unsqueeze(1).expand(
                 -1, self.n_heads, -1, -1
             )  # B, H, N, N
@@ -269,16 +353,17 @@ class StageEncoder(nn.Module):
             q = q.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
             k = k.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
             v = v.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
-            x = self.droppath1(
-                self.out(
-                    torch.nn.functional.scaled_dot_product_attention(q, k, v, attention_bias)
-                    .permute(0, 2, 1, 3)
-                    .reshape(B, N, D)
-                ),
-                mask=x_mask,
-            ) + x
+            attention_output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attention_bias,
+            ).permute(0, 2, 1, 3).reshape(B, N, D)
+            attention_output = self.out(attention_output) * row_has_key.unsqueeze(-1)
+            x = x + self.droppath1(attention_output, mask=x_mask) # B, N, D
 
-        x = self.droppath2(self.down(self.act(self.up(self.ffn_norm(x)))), mask=x_mask) + x # B, N, D
+        ffn_output = self.down(self.act(self.up(self.ffn_norm(x))))
+        x = x + self.droppath2(ffn_output, mask=x_mask) # B, N, D
         
         return x
 
@@ -290,16 +375,29 @@ class IMTS_SubModel(nn.Module):
         self.configs = configs
         self.d_model = configs.d_model
         self.n_variates = configs.enc_in
+        self.gate_warmup_epochs = configs.gate_warmup_epochs
 
-        self.value_embedding = nn.Parameter(torch.empty(self.n_variates, self.d_model))
-        self.value_embedding_act = nn.GELU()
-        self.time_embedding = nn.Linear(1, self.d_model)
-        self.time_embedding_act = nn.GELU()
+        self.value_encoder = nn.Sequential(
+            PerVariateLinear(self.n_variates, 1, self.d_model),
+            nn.GELU(),
+            PerVariateLinear(self.n_variates, self.d_model, self.d_model),
+        )
+        self.time_embedding = nn.Linear(self.d_model, self.d_model)
+        self.register_buffer(
+            "time_divisor",
+            torch.exp(
+                torch.arange(0, self.d_model, 2, dtype=torch.float32)
+                * (-math.log(10000.0) / self.d_model)
+            ),
+        )
+        self.time_gap_embedding = nn.Linear(self.d_model, self.d_model)
+        self.frequency_embedding = nn.Linear(self.d_model, self.d_model)
         self.variate_embedding = nn.Parameter(torch.empty(self.n_variates, self.d_model))
-        self.event_missing_embedding = nn.Embedding(2, self.d_model)
-        self.temporal_missing_embedding = nn.Linear(1, self.d_model)
-        self.missing_embedding_act = nn.GELU()
-        self.query = nn.Parameter(torch.rand(1, 1, 1, self.d_model))
+        self.query = nn.Parameter(torch.rand(1, 1, self.n_variates, self.d_model))
+        self.value_norm = nn.LayerNorm(self.d_model)
+        self.time_norm = nn.LayerNorm(self.d_model)
+        self.missingness_norm = nn.LayerNorm(self.d_model)
+        self.variate_norm = nn.LayerNorm(self.d_model)
         self.event_norm = nn.LayerNorm(self.d_model)
 
         self.stage0_encoder = nn.ModuleList([
@@ -335,40 +433,30 @@ class IMTS_SubModel(nn.Module):
             )
             for _ in range(configs.n_layers)
         ])
-        self.stage3_encoder = nn.ModuleList([
-            StageEncoder(
-                d_model=self.d_model,
-                n_heads=configs.n_heads,
-                d_ff=configs.d_ff,
-                n_variates=self.n_variates,
-                dropout=configs.dropout,
-                stage=3,
-            )
-            for _ in range(configs.n_layers)
-        ])
         
         self.output_norm = nn.LayerNorm(self.d_model)
         self.output_projection = nn.Sequential(
-            nn.Linear(self.d_model, configs.d_ff),
+            PerVariateLinear(self.n_variates, self.d_model, self.d_model),
             nn.GELU(),
-            nn.Linear(configs.d_ff, self.d_model),
-            nn.GELU(),
-            nn.Linear(self.d_model, 1),
+            PerVariateLinear(self.n_variates, self.d_model, 1),
         )
 
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
         model_std = self.d_model ** -0.5
-        nn.init.normal_(self.value_embedding, mean=0.0, std=model_std)
         nn.init.normal_(self.variate_embedding, mean=0.0, std=model_std)
-        nn.init.normal_(self.event_missing_embedding.weight, mean=0.0, std=model_std)
         nn.init.normal_(self.query, mean=0.0, std=model_std)
-        self.time_embedding.reset_parameters()
-        self.temporal_missing_embedding.reset_parameters()
-        for module in self.output_projection:
+        for module in self.value_encoder:
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
+        self.time_gap_embedding.reset_parameters()
+        self.frequency_embedding.reset_parameters()
+        self.time_embedding.reset_parameters()
+        self.value_norm.reset_parameters()
+        self.time_norm.reset_parameters()
+        self.variate_norm.reset_parameters()
+        self.missingness_norm.reset_parameters()
         self.event_norm.reset_parameters()
         for block in self.stage0_encoder:
             block.reset_parameters()
@@ -376,49 +464,110 @@ class IMTS_SubModel(nn.Module):
             block.reset_parameters()
         for block in self.stage2_encoder:
             block.reset_parameters()
-        for block in self.stage3_encoder:
-            block.reset_parameters()
         self.output_norm.reset_parameters()
         for layer in self.output_projection:
             if hasattr(layer, "reset_parameters"):
                 layer.reset_parameters()
 
-    def _build_missingness_embedding(self, input_mark, input_mask):
-        input_mask = input_mask > 0
-        event_missing_embed = self.event_missing_embedding(input_mask.long())
+    def _get_observation_history(self, observation_mask: Tensor) -> tuple[Tensor, Tensor]:
+        sequence_length = observation_mask.shape[1]
+        positions = torch.arange(
+            sequence_length,
+            device=observation_mask.device,
+            dtype=torch.long,
+        ).view(1, sequence_length, 1)
+        # Shift cumulative observation indices by one step to exclude the current value.
+        last_observation_positions = torch.where(
+            observation_mask,
+            positions,
+            -1,
+        ).cummax(dim=1).values
+        previous_observation_positions = torch.cat(
+            [
+                torch.full_like(last_observation_positions[:, :1], -1),
+                last_observation_positions[:, :-1],
+            ],
+            dim=1,
+        )
+        return positions, previous_observation_positions
 
-        time_axis = input_mark.squeeze(-1).unsqueeze(-1).expand_as(input_mask)
-        observed_time = torch.where(input_mask, time_axis, torch.zeros_like(time_axis))
-        last_observed_time = torch.cummax(observed_time, dim=1).values
-        has_history = input_mask.cumsum(dim=1) > 0
-        temporal_gap = torch.where(has_history, time_axis - last_observed_time, time_axis)
-        temporal_gap = temporal_gap.unsqueeze(-1)
-        temporal_missing_embed = self.temporal_missing_embedding(temporal_gap)
+    def _build_missingness_embedding(self, input_mark, observation_mask, observation_history=None):
+        """Embed previous-observation gaps and unit-duration/count per variable."""
+        observation_mask = observation_mask > 0
+        time_axis = input_mark.expand_as(observation_mask)
+        _, previous_observation_positions = (
+            observation_history
+            if observation_history is not None
+            else self._get_observation_history(observation_mask)
+        )
+
+        has_previous_observation = previous_observation_positions >= 0
+        previous_observation_time = time_axis.gather(
+            dim=1,
+            index=previous_observation_positions.clamp_min(0),
+        )
+        time_since_previous = torch.where(
+            has_previous_observation,
+            (time_axis - previous_observation_time).clamp_min(0),
+            torch.ones_like(time_axis),
+        )
+        time_gap_embed = self.time_gap_embedding(
+            self._build_sinusoidal_embedding(time_since_previous.unsqueeze(-1))
+        )
+        observation_count = observation_mask.sum(dim=1, keepdim=True)
+        frequency = observation_count.clamp_min(1).to(time_axis.dtype).reciprocal()
+        frequency_embed = self.frequency_embedding(
+            self._build_sinusoidal_embedding(frequency.unsqueeze(-1))
+        )
         
-        missingness_embed = self.missing_embedding_act(event_missing_embed + temporal_missing_embed)
-        return missingness_embed
+        missingness_embedding = (time_gap_embed + frequency_embed) / 2
+        return missingness_embedding
+
+    def _build_sinusoidal_embedding(self, time_marks: Tensor) -> Tensor:
+        time_angles = time_marks * (2 * math.pi) * self.time_divisor
+        return torch.stack(
+            [torch.sin(time_angles), torch.cos(time_angles)],
+            dim=-1,
+        ).flatten(start_dim=-2)[..., :self.d_model]
+
+    def _build_time_embedding(self, time_marks: Tensor) -> Tensor:
+        return self.time_embedding(self._build_sinusoidal_embedding(time_marks))
+
+    def _build_value_embedding(self, x, y_mask):
+        # Encode the input values
+        x_value_embed = self.value_encoder(x.unsqueeze(-1))
+        # Embed the pseudo values
+        y_pseudo_value_embed = self.query * y_mask.unsqueeze(-1)
+        return torch.cat([x_value_embed, y_pseudo_value_embed], dim=1)
 
     def _build_event_embedding(self, x, x_mark, x_mask, y_mark, y_mask):
-        batch_size, _, n_variates = x.shape
-        
-        # Embedding original values and query token
-        value_embed = self.value_embedding_act(torch.einsum("bnv,vd->bnvd", x, self.value_embedding))
-        value_embed  = torch.cat([value_embed, self.query.expand(batch_size, y_mark.shape[1], n_variates, -1)], dim=1) # B, L+L', V, D
-        
-        # Embedding time marks
         input_mark = torch.cat([x_mark, y_mark], dim=1) # B, L+L', 1
-        time_embed = self.time_embedding_act(self.time_embedding(input_mark)).unsqueeze(2)
+
+        # 1. Generate the value embedding
+        value_embed = self._build_value_embedding(x, y_mask)
         
-        # Embedding missingness
-        input_mask = torch.cat([x_mask, y_mask], dim=1) # B, L+L', V
-        missingness_embed = self._build_missingness_embedding(input_mark, input_mask)
+        # 2. Generate the time embedding
+        time_embed = self._build_time_embedding(input_mark).unsqueeze(2)
         
-        # Embedding variate
-        variate_embed = self.variate_embedding.view(1, 1, n_variates, self.d_model)
+        # 3. Generate the missingness embedding
+        observation_mask = torch.cat([x_mask > 0, torch.zeros_like(y_mask, dtype=torch.bool)], dim=1)
+        observation_history = self._get_observation_history(observation_mask)
+        missingness_embed = self._build_missingness_embedding(
+            input_mark,
+            observation_mask,
+            observation_history,
+        )
         
-        # Combine all embeddings and normalize
-        event_embed = self.event_norm(value_embed + time_embed + variate_embed + missingness_embed)
-        return event_embed
+        # 4. Generate the variate embedding
+        variate_embed = self.variate_embedding.view(1, 1, self.n_variates, self.d_model)
+
+        # 5. Combine all embeddings to form the final event embedding.
+        return self.event_norm(
+            self.value_norm(value_embed)
+            + self.time_norm(time_embed)
+            + self.variate_norm(variate_embed)
+            + self.missingness_norm(missingness_embed)
+        )
     
     def _relocate_events(self, events, events_mark, events_mask, x_len):
         """
@@ -470,6 +619,46 @@ class IMTS_SubModel(nn.Module):
         
         return events_new, events_mark_new, events_mask_new, y_mask_new, y_orig_l_new, y_orig_v_new
 
+    def _decode_query_tokens(
+        self,
+        events: Tensor,
+        query_mask: Tensor,
+        y_orig_l: Tensor,
+        y_orig_v: Tensor,
+        pred_len: int,
+    ) -> Tensor:
+        """Scatter packed query tokens back to prediction-time and variable axes."""
+        decoded = events.new_zeros(
+            (events.shape[0], pred_len, self.n_variates, self.d_model)
+        )
+        batch_index, event_index = query_mask.nonzero(as_tuple=True)
+        if batch_index.numel() > 0:
+            decoded[
+                batch_index,
+                y_orig_l[batch_index, event_index],
+                y_orig_v[batch_index, event_index],
+            ] = events[batch_index, event_index]
+        return decoded
+
+    def _aggregate_batch_context(
+        self,
+        events: Tensor,
+        events_mask: Tensor,
+        query_mask: Tensor,
+    ) -> Tensor:
+        """Mean-pool all valid encoded x tokens within each batch sample."""
+        historical_mask = events_mask.squeeze(-1).bool() & ~query_mask
+        weights = historical_mask.to(events.dtype)
+        return (events * weights.unsqueeze(-1)).sum(dim=1) / weights.sum(
+            dim=1,
+            keepdim=True,
+        ).clamp_min(1)
+
+    def _get_predicted_gate_weight(self, current_epoch: int | None) -> float:
+        if current_epoch is None or self.gate_warmup_epochs <= 0:
+            return 1.0
+        return min(max((current_epoch + 1) / self.gate_warmup_epochs, 0.0), 1.0)
+
     def forward(
         self,
         x: Tensor,
@@ -477,10 +666,11 @@ class IMTS_SubModel(nn.Module):
         x_mask: Tensor,
         y_mark: Tensor,
         y_mask: Tensor,
+        current_epoch: int | None = None,
     ) -> Tensor:
-        
-        n_variates = x.shape[2]
         x_len = x_mark.shape[1]
+        original_y_mask = y_mask
+        predicted_gate_weight = self._get_predicted_gate_weight(current_epoch)
         
         # 1. Embedding inputs and queries
         events = self._build_event_embedding(x, x_mark, x_mask, y_mark, y_mask)
@@ -488,34 +678,64 @@ class IMTS_SubModel(nn.Module):
         events_mask = torch.cat([x_mask, y_mask], dim=1) # B, L+L', V
         
         # 2. Relocate events once after embedding.
-        events, events_mark, events_mask, y_mask, y_orig_l, y_orig_v = self._relocate_events(
+        events, events_mark, events_mask, query_mask, y_orig_l, y_orig_v = self._relocate_events(
             events, events_mark, events_mask, x_len
         )
         # events: B, N, D
         # events_mark: B, N, 1
         # events_mask: B, N, 1
-        # y_mask: B, N (True where position came from y)
+        # query_mask: B, N (True where position came from y)
         # y_orig_l: B, N (original l-index in y for y-tokens)
         # y_orig_v: B, N (original v-index in y for y-tokens)
+
+        # 3. Capture query representations after each hierarchical stage.
+        multiscale_queries = []
+        
         for blk in self.stage0_encoder:
-            events = blk(events, events_mark, events_mask) # B, N, D
+            events = blk(events, events_mark, events_mask, query_mask=query_mask) # B, N, D
+        # multiscale_queries.append(
+        #     self._decode_query_tokens(events, query_mask, y_orig_l, y_orig_v, y_mark.shape[1])
+        # )
+
         for blk in self.stage1_encoder:
-            events = blk(events, events_mark, events_mask, tau_time=1e-6) # B, N, D
+            events = blk(
+                events,
+                events_mark,
+                events_mask,
+                tau_time=0.01,
+                query_mask=query_mask,
+                predicted_gate_weight=predicted_gate_weight,
+            ) # B, N, D
+        # multiscale_queries.append(
+        #     self._decode_query_tokens(events, query_mask, y_orig_l, y_orig_v, y_mark.shape[1])
+        # )
+
         for blk in self.stage2_encoder:
-            events = blk(events, events_mark, events_mask, tau_time=1e-6) # B, N, D
-        for blk in self.stage3_encoder:
-            events = blk(events, events_mark, events_mask) # B, N, D
+            events = blk(
+                events,
+                events_mark,
+                events_mask,
+                tau_time=0.01,
+                tau_variate=0.5,
+                query_mask=query_mask,
+                predicted_gate_weight=predicted_gate_weight,
+            ) # B, N, D
+        multiscale_queries.append(
+            self._decode_query_tokens(events, query_mask, y_orig_l, y_orig_v, y_mark.shape[1])
+        )
 
-        # 3. Scatter y-tokens from x back to (B, L', V, D) using tracked original positions
-        B = events.shape[0]
-        L_prime = y_mark.shape[1]
-        decoded = events.new_zeros((B, L_prime, n_variates, self.d_model))
-        b_idx_y, n_idx_y = y_mask.nonzero(as_tuple=True)
-        if b_idx_y.numel() > 0:
-            l_idx_y = y_orig_l[b_idx_y, n_idx_y]
-            v_idx_y = y_orig_v[b_idx_y, n_idx_y]
-            decoded[b_idx_y, l_idx_y, v_idx_y] = events[b_idx_y, n_idx_y]
+        # 4. Append a global context pooled from every valid encoded x token.
+        # batch_context = self._aggregate_batch_context(
+        #     events,
+        #     events_mask,
+        #     query_mask,
+        # ).view(events.shape[0], 1, 1, self.d_model)
+        
+        # multiscale_queries.append(
+        #     batch_context.expand(-1, y_mark.shape[1], self.n_variates, -1)
+        # )
 
-        decoded = self.output_norm(decoded)
-        outputs = self.output_projection(decoded).squeeze(-1)
-        return outputs #* y_mask.to(outputs.dtype)
+        # 5. Concatenate stage-wise query features and global context for decoding.
+        decoded = torch.cat(multiscale_queries, dim=-1)
+        outputs = self.output_projection(self.output_norm(decoded)).squeeze(-1)
+        return outputs * original_y_mask

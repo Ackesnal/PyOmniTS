@@ -14,9 +14,12 @@ from torch import Tensor, optim
 from torch.nn import Module
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import (
+    ConstantLR,
     CosineAnnealingLR,
     LambdaLR,
     LRScheduler,
+    OneCycleLR,
+    SequentialLR,
 )
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -62,7 +65,12 @@ class Exp_Main(Exp_Basic):
         model_optim = optim.Adam(model.parameters(), lr=self.configs.learning_rate)
         return model_optim
 
-    def _select_lr_scheduler(self, optimizer: optim.Optimizer) -> LRScheduler:
+    def _select_lr_scheduler(
+        self,
+        optimizer: optim.Optimizer,
+        steps_per_epoch: int | None = None,
+    ) -> LRScheduler:
+        gate_warmup_epochs = max(0, getattr(self.configs, 'gate_warmup_epochs', 0) or 0)
         # Initialize scheduler based on configs.lradj
         if self.configs.lr_scheduler == 'ExponentialDecayLR':
             '''
@@ -83,23 +91,50 @@ class Exp_Main(Exp_Basic):
             '''
             Originally named as 'type3'
             '''
-            scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0 if epoch < 2 else (0.8 ** (epoch - 2)))
+            decay_start = max(2, gate_warmup_epochs)
+            scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 0.8 ** max(epoch - decay_start, 0))
         elif self.configs.lr_scheduler == 'CosineAnnealingLR':
             '''
             Originally named as 'cosine'
             '''
-            scheduler = CosineAnnealingLR(optimizer, T_max=self.configs.train_epochs, eta_min=0.0)
+            scheduler = CosineAnnealingLR(
+                optimizer, T_max=max(1, self.configs.train_epochs - gate_warmup_epochs), eta_min=0.0
+            )
         elif self.configs.lr_scheduler == "MultiStepLR":
             '''
             Configured following CSDI
             '''
+            decay_epochs = max(1, self.configs.train_epochs - gate_warmup_epochs)
             scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                optimizer, milestones=[0.75 * self.configs.train_epochs, 0.9 * self.configs.train_epochs], gamma=self.configs.lr_scheduler_gamma
+                optimizer, milestones=[0.75 * decay_epochs, 0.9 * decay_epochs], gamma=self.configs.lr_scheduler_gamma
+            )
+        elif self.configs.lr_scheduler == "OneCycleLR":
+            if self.configs.max_lr is None:
+                raise ValueError("OneCycleLR requires --max_lr")
+            if steps_per_epoch is None or steps_per_epoch < 1:
+                raise ValueError("OneCycleLR requires a positive steps_per_epoch")
+            if gate_warmup_epochs >= self.configs.train_epochs:
+                return LambdaLR(optimizer, lr_lambda=lambda step: 1.0)
+            scheduler = OneCycleLR(
+                optimizer,
+                max_lr=self.configs.max_lr,
+                pct_start=self.configs.pct_start,
+                epochs=self.configs.train_epochs - gate_warmup_epochs,
+                steps_per_epoch=steps_per_epoch,
             )
         else:
             logger.exception(f"Unknown lr scheduler '{self.configs.lr_scheduler}'", stack_info=True)
             exit(1)
 
+        if gate_warmup_epochs and self.configs.lr_scheduler != 'DelayedStepDecayLR':
+            hold_steps = gate_warmup_epochs
+            if self.configs.lr_scheduler == 'OneCycleLR':
+                hold_steps *= steps_per_epoch
+            scheduler = SequentialLR(
+                optimizer,
+                schedulers=[ConstantLR(optimizer, factor=1.0, total_iters=hold_steps), scheduler],
+                milestones=[hold_steps],
+            )
         return scheduler
 
     def _select_criterion(self) -> Module:
@@ -230,7 +265,6 @@ class Exp_Main(Exp_Basic):
         model_train = self._build_model()
 
         model_optim = self._select_optimizer(model_train)
-        lr_scheduler = self._select_lr_scheduler(model_optim)
         criterion = self._select_criterion()
 
         if not self.configs.sweep:
@@ -242,6 +276,12 @@ class Exp_Main(Exp_Basic):
             model_train, model_optim = accelerator.prepare(
                 model_train, model_optim
             )
+
+        lr_scheduler = self._select_lr_scheduler(
+            model_optim,
+            steps_per_epoch=len(train_loader),
+        )
+        is_batch_lr_scheduler = self.configs.lr_scheduler == "OneCycleLR"
 
         # Save initial states
         initial_optimizer_state = model_optim.state_dict()
@@ -317,6 +357,8 @@ class Exp_Main(Exp_Basic):
                         if self.configs.task_name == "classification":
                             clip_grad_norm_(model_train.parameters(), max_norm=4.0)
                         model_optim.step()
+                        if is_batch_lr_scheduler:
+                            lr_scheduler.step()
 
                 if if_nan_loss:
                     accelerator.set_trigger()
@@ -352,7 +394,8 @@ class Exp_Main(Exp_Basic):
                         "loss_train": np.mean(train_loss),
                     })
 
-                lr_scheduler.step()
+                if not is_batch_lr_scheduler:
+                    lr_scheduler.step()
                 logger.debug(f'Updating learning rate to {lr_scheduler.get_last_lr()[0]:.6e}')
                 if accelerator.check_trigger():
                     accelerator.wait_for_everyone()

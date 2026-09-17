@@ -67,7 +67,7 @@ class ExperimentRunner:
         if self.configs.wandb and accelerator.is_main_process:
             import wandb
             wandb.init(
-                project="CHORD_Experiments",
+                project="CHORD_P12_Experiments",
                 config={
                     "model_name": self.configs.model_name,
                     "model_id": self.configs.model_id,
@@ -294,7 +294,7 @@ class SweepManager:
         if accelerator.is_main_process:
             sweep_id = wandb.sweep(
                 sweep=sweep_configuration, 
-                project="CHORD_Experiments"
+                project="CHORD_P12_Experiments"
             )
             with open(temp_file_path, mode='w', encoding="utf-8") as f:
                 f.write(sweep_id)
@@ -323,7 +323,7 @@ class SweepManager:
         wandb.agent(
             sweep_id,
             function=sweep_main,
-            project="CHORD_Experiments",
+            project="CHORD_P12_Experiments",
             count=max_count
         )
 

@@ -29,6 +29,7 @@ f: '1'
 factor: 1
 features: M
 freq: h
+gate_warmup_epochs: 10
 gpu_id: 0
 gpu_ids: null
 hidden_layers: 1

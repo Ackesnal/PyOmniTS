@@ -59,8 +59,9 @@ class ExpConfigs:
     # training
     batch_size: int # = field(metadata={"sweep": [16, 32, 64, 128]})
     itr: int
-    learning_rate: float = field(metadata={"sweep": [5e-4, 1e-3, 2e-3, 5e-3]})
+    learning_rate: float = field(metadata={"sweep": [1e-4, 5e-4, 1e-3, 2e-3, 5e-3]})
     loss: str
+    optimizer: str
     lr_scheduler: str
     lr_scheduler_gamma: float
     gate_warmup_epochs: int
@@ -93,13 +94,13 @@ class ExpConfigs:
     activation: str
     c_out: int
     channel_independence: int
-    d_ff: int = field(metadata={"sweep": [64, 128, 256, 512, 1024]})
-    d_layers: int # = field(metadata={"sweep": [1, 2, 3]})
-    d_model: int = field(metadata={"sweep": [64, 128, 256, 512]})
+    d_ff: int = field(metadata={"sweep": [8, 16, 32, 64, 128]})
+    d_layers: int
+    d_model: int = field(metadata={"sweep": [8, 16, 32, 64, 128]})
     d_timesteps: int
     dec_in: int
     dropout: float # = field(metadata={"sweep": [0.0, 0.1, 0.2]})
-    e_layers: int # = field(metadata={"sweep": [1, 2, 3, 4, 8]})
+    e_layers: int 
     embed_type: int
     enc_in: int
     factor: int
@@ -108,8 +109,8 @@ class ExpConfigs:
     individual: int
     kernel_size: int # = field(metadata={"sweep": [2, 3, 4, 5]})
     moving_avg: int
-    n_heads: int = field(metadata={"sweep": [1, 2, 4, 8, 16]})
-    n_layers: int # = field(metadata={"sweep": [1, 2, 3, 4]})
+    n_heads: int = field(metadata={"sweep": [1, 2, 4, 8]})
+    n_layers: int = field(metadata={"sweep": [1, 2, 3, 4]})
     n_patches_list: list[int]
     node_dim: int
     patch_len: int
@@ -172,7 +173,7 @@ class ExpConfigs:
     # tPatchGNN
     tpatchgnn_te_dim: int
     # CHORD
-    gate_warmup_epochs: int = field(metadata={"sweep": [5, 10, 20]})
+    gate_warmup_epochs: int = field(metadata={"sweep": [1, 5, 10, 20]})
 
     # Used to be compatible with ipython. Never used
     f: int = 1
@@ -183,6 +184,11 @@ class ExpConfigs:
     patch_len_max_irr: int | None = None # maximum number of observations along time dimension in a patch of x, set in irregular time series datasets
     subfolder_train: str = "" # timestamp of training in format %Y_%m%d_%H%M
     itr_i: int = 0 # current training iteration. [0, itr-1]
+
+    # Optional workflow controls; defaults retain pre-melody behaviour.
+    skip_test: int = 0
+    random_seed: int = 2024
+
 
 class ExpConfigsTracker:
     """Wrapper that tracks which ExpConfigs attributes are accessed"""

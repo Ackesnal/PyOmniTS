@@ -1,4 +1,4 @@
-use_multi_gpu=1
+use_multi_gpu=0
 if [ $use_multi_gpu -eq 0 ]; then
     launch_command="python"
 else
@@ -16,17 +16,18 @@ model_name="$(basename "$(dirname "$(readlink -f "$0")")")"
 model_id=$model_name
 
 seq_len=2160
-d_model=32
+d_model=64
 for pred_len in 3; do
-    $launch_command main.py \
+    CUDA_VISIBLE_DEVICES=1 $launch_command main.py \
     --is_training 1 \
     --collate_fn "collate_fn" \
     --loss "MSE" \
-    --dropout 0.1 \
+    --dropout 0.0 \
     --d_model $d_model \
     --d_ff 128 \
     --n_layers 2 \
-    --n_heads 4 \
+    --n_heads 8 \
+    --gate_warmup_epochs 5 \
     --use_multi_gpu $use_multi_gpu \
     --dataset_root_path $dataset_root_path \
     --model_id $model_id \
@@ -42,7 +43,8 @@ for pred_len in 3; do
     --train_epochs 100 \
     --patience 10 \
     --val_interval 1 \
-    --itr 5 \
-    --batch_size 16 \
-    --learning_rate 1e-3
+    --itr 1 \
+    --batch_size 32 \
+    --learning_rate 1e-3 \
+    --wandb 1
 done

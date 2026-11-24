@@ -62,8 +62,12 @@ class Exp_Main(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self, model: Module) -> optim.Optimizer:
-        model_optim = optim.Adam(model.parameters(), lr=self.configs.learning_rate)
-        return model_optim
+        optimizer_name = getattr(self.configs, "optimizer", "Adam")
+        optimizer_class = {
+            "Adam": optim.Adam,
+            "AdamW": optim.AdamW,
+        }[optimizer_name]
+        return optimizer_class(model.parameters(), lr=self.configs.learning_rate)
 
     def _select_lr_scheduler(
         self,

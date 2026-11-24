@@ -303,6 +303,10 @@ class StageEncoder(nn.Module):
                     predicted_gate_weight,
                 )  # B, N, N
             else:
+                source_variate = torch.floor(x_mark).clamp(
+                    min=0,
+                    max=self.n_variates - 1
+                ).long()  # B, N
                 attention_bias = torch.zeros((B, N, N), dtype=x.dtype, device=x.device)
 
             if self.stage == 1:
@@ -349,7 +353,7 @@ class StageEncoder(nn.Module):
             )  # B, H, N, N
 
             # Self-attention with scaled dot-product attention
-            q, k, v = self.qkv(x).chunk(3, dim=-1) # B, N, D each
+            q, k, v = self.qkv(self.attn_norm(x)).chunk(3, dim=-1) # B, N, D each
             q = q.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
             k = k.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
             v = v.reshape(B, N, self.n_heads, D // self.n_heads).permute(0, 2, 1, 3) # B, H, N, D_head
@@ -360,10 +364,10 @@ class StageEncoder(nn.Module):
                 attention_bias,
             ).permute(0, 2, 1, 3).reshape(B, N, D)
             attention_output = self.out(attention_output) * row_has_key.unsqueeze(-1)
-            x = self.attn_norm(x + self.droppath1(attention_output, mask=x_mask)) # B, N, D
+            x = x + self.droppath1(attention_output, mask=x_mask) # B, N, D
 
-        ffn_output = self.down(self.act(self.up(x)))
-        x = self.ffn_norm(x + self.droppath2(ffn_output, mask=x_mask)) # B, N, D
+        ffn_output = self.down(self.act(self.up(self.ffn_norm(x))))
+        x = x + self.droppath2(ffn_output, mask=x_mask) # B, N, D
         
         return x
 
@@ -394,10 +398,10 @@ class IMTS_SubModel(nn.Module):
         self.frequency_embedding = nn.Linear(self.d_model, self.d_model)
         self.variate_embedding = nn.Parameter(torch.empty(self.n_variates, self.d_model))
         self.query = nn.Parameter(torch.rand(1, 1, self.n_variates, self.d_model))
-        self.value_norm = nn.LayerNorm(self.d_model)
-        self.time_norm = nn.LayerNorm(self.d_model)
-        self.missingness_norm = nn.LayerNorm(self.d_model)
-        self.variate_norm = nn.LayerNorm(self.d_model)
+        # self.value_norm = nn.LayerNorm(self.d_model)
+        # self.time_norm = nn.LayerNorm(self.d_model)
+        # self.missingness_norm = nn.LayerNorm(self.d_model)
+        # self.variate_norm = nn.LayerNorm(self.d_model)
         self.event_norm = nn.LayerNorm(self.d_model)
 
         self.stage0_encoder = nn.ModuleList([
@@ -434,15 +438,16 @@ class IMTS_SubModel(nn.Module):
             for _ in range(configs.n_layers)
         ])
         
-        # self.output_norm_0 = nn.LayerNorm(self.d_model)
-        # self.output_norm_1 = nn.LayerNorm(self.d_model)
-        # self.output_norm_2 = nn.LayerNorm(self.d_model)
-        # self.output_norm_3 = nn.LayerNorm(self.d_model)
+        self.output_norm_0 = nn.LayerNorm(self.d_model)
+        self.output_norm_1 = nn.LayerNorm(self.d_model)
+        self.output_norm_2 = nn.LayerNorm(self.d_model)
+        self.output_norm_3 = nn.LayerNorm(self.d_model)
         self.output_projection = nn.Sequential(
-            PerVariateLinear(self.n_variates, self.d_model*4, self.d_model),
+            PerVariateLinear(self.n_variates, self.d_model*4, self.d_model*2),
+            nn.GELU(),
+            PerVariateLinear(self.n_variates, self.d_model*2, self.d_model),
             nn.GELU(),
             PerVariateLinear(self.n_variates, self.d_model, 1),
-            # nn.Linear(self.d_model*4, 1),
         )
 
         self.reset_parameters()
@@ -457,10 +462,10 @@ class IMTS_SubModel(nn.Module):
         self.time_gap_embedding.reset_parameters()
         self.frequency_embedding.reset_parameters()
         self.time_embedding.reset_parameters()
-        self.value_norm.reset_parameters()
-        self.time_norm.reset_parameters()
-        self.variate_norm.reset_parameters()
-        self.missingness_norm.reset_parameters()
+        # self.value_norm.reset_parameters()
+        # self.time_norm.reset_parameters()
+        # self.variate_norm.reset_parameters()
+        # self.missingness_norm.reset_parameters()
         self.event_norm.reset_parameters()
         for block in self.stage0_encoder:
             block.reset_parameters()
@@ -468,10 +473,10 @@ class IMTS_SubModel(nn.Module):
             block.reset_parameters()
         for block in self.stage2_encoder:
             block.reset_parameters()
-        # self.output_norm_0.reset_parameters()
-        # self.output_norm_1.reset_parameters()
-        # self.output_norm_2.reset_parameters()
-        # self.output_norm_3.reset_parameters()
+        self.output_norm_0.reset_parameters()
+        self.output_norm_1.reset_parameters()
+        self.output_norm_2.reset_parameters()
+        self.output_norm_3.reset_parameters()
         for layer in self.output_projection:
             if hasattr(layer, "reset_parameters"):
                 layer.reset_parameters()
@@ -569,10 +574,12 @@ class IMTS_SubModel(nn.Module):
         variate_embed = self.variate_embedding.view(1, 1, self.n_variates, self.d_model)
 
         # 5. Combine all embeddings to form the final event embedding.
-        event_embed = self.value_norm(value_embed) + \
-                      self.time_norm(time_embed) + \
-                      self.variate_norm(variate_embed) + \
-                      self.missingness_norm(missingness_embed)
+        event_embed = value_embed + time_embed + variate_embed + missingness_embed
+        
+        # self.value_norm(value_embed) + \
+        #               self.time_norm(time_embed) + \
+        #               self.variate_norm(variate_embed) + \
+        #               self.missingness_norm(missingness_embed)
         return self.event_norm(event_embed)
     
     def _relocate_events(self, events, events_mark, events_mask, x_len):
@@ -705,13 +712,13 @@ class IMTS_SubModel(nn.Module):
                 query_mask=query_mask
             ) # B, N, D
         multiscale_queries.append(
-            self._decode_query_tokens(
+            self.output_norm_0(self._decode_query_tokens(
                 events, 
                 query_mask, 
                 y_orig_l, 
                 y_orig_v, 
                 y_mark.shape[1]
-            )
+            ))
         )
 
         for blk in self.stage1_encoder:
@@ -719,18 +726,18 @@ class IMTS_SubModel(nn.Module):
                 events,
                 events_mark,
                 events_mask,
-                tau_time=0.1,
+                tau_time=0.001,
                 query_mask=query_mask,
                 predicted_gate_weight=predicted_gate_weight,
             ) # B, N, D
         multiscale_queries.append(
-            self._decode_query_tokens(
+            self.output_norm_1(self._decode_query_tokens(
                 events, 
                 query_mask, 
                 y_orig_l, 
                 y_orig_v, 
                 y_mark.shape[1]
-            )
+            ))
         )
 
         for blk in self.stage2_encoder:
@@ -738,27 +745,27 @@ class IMTS_SubModel(nn.Module):
                 events,
                 events_mark,
                 events_mask,
-                tau_time=0.1,
-                tau_variate=0.1,
+                tau_time=0.001,
+                tau_variate=0.001,
                 query_mask=query_mask,
                 predicted_gate_weight=predicted_gate_weight,
             ) # B, N, D
         multiscale_queries.append(
-            self._decode_query_tokens(
+            self.output_norm_2(self._decode_query_tokens(
                 events, 
                 query_mask, 
                 y_orig_l, 
                 y_orig_v, 
                 y_mark.shape[1]
-            )
+            ))
         )
 
         # 4. Append a global context pooled from every valid encoded x token.
-        batch_context = self._aggregate_batch_context(
+        batch_context = self.output_norm_3(self._aggregate_batch_context(
             events,
             events_mask,
             query_mask,
-        ).view(events.shape[0], 1, 1, self.d_model)
+        ).view(events.shape[0], 1, 1, self.d_model))
         
         multiscale_queries.append(
             batch_context.expand(-1, y_mark.shape[1], self.n_variates, -1)

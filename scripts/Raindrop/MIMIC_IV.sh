@@ -17,7 +17,7 @@ model_id=$model_name
 
 seq_len=2160
 for pred_len in 3; do
-    $launch_command main.py \
+    CUDA_VISIBLE_DEVICES=1 $launch_command main.py \
     --is_training 1 \
     --collate_fn "collate_fn" \
     --n_layers 2 \
@@ -40,7 +40,7 @@ for pred_len in 3; do
     --patience 10 \
     --val_interval 1 \
     --itr 5 \
-    --batch_size 32 \
+    --batch_size 16 \
     --learning_rate 1e-4
 done
 

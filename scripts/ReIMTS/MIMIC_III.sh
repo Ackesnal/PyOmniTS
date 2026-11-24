@@ -18,11 +18,11 @@ seq_len=72
 for pred_len in 3; do
     for ts_backbone_name in \
         GraFITi \
-        PrimeNet \
-        mTAN \
-        TimeCHEAT \
-        GRU_D \
-        Raindrop
+        # PrimeNet \
+        # mTAN \
+        # TimeCHEAT \
+        # GRU_D \
+        # Raindrop
     do
         model_id="$model_name"_$ts_backbone_name
         case $ts_backbone_name in

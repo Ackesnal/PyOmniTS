@@ -17,7 +17,7 @@ model_id=$model_name
 
 seq_len=36
 for pred_len in 3; do
-    $launch_command main.py \
+    CUDA_VISIBLE_DEVICES=1 $launch_command main.py \
     --is_training 1 \
     --d_model 128 \
     --n_train_stages 2 \

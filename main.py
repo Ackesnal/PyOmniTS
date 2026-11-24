@@ -32,7 +32,7 @@ class ExperimentRunner:
     
     def _setup_random_seeds(self, iteration: int):
         """Set random seeds for reproducibility."""
-        seed = 2024 + iteration
+        seed = self.configs.random_seed + iteration
         random.seed(seed)
         torch.manual_seed(seed)
         np.random.seed(seed)
@@ -192,7 +192,10 @@ class ExperimentRunner:
         
         self._setup_random_seeds(0)
         self.train()
-        self.test()
+        if not self.configs.skip_test:
+            self.test()
+        else:
+            logger.info('Independent test skipped; train/validation workflow only.')
     
     def run_training(self):
         """
@@ -208,10 +211,15 @@ class ExperimentRunner:
             self.train()
             torch.cuda.empty_cache()
         
-        self.test()
+        if not self.configs.skip_test:
+            self.test()
+        else:
+            logger.info('Independent test skipped; train/validation workflow only.')
     
     def run_test_only(self):
         """Run testing only."""
+        if self.configs.skip_test:
+            raise ValueError("--skip_test 1 requires --is_training 1")
         self.test()
 
 
